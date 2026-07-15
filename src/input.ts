@@ -50,8 +50,11 @@ export class InputState {
 
   /** Advances ramped values toward their target (held-key) state. */
   update(dt: number) {
+    // The cockpit camera is yawed 180° to face the nose, which flips
+    // screen-left/right relative to world +X - so "steer right" needs to
+    // be the world -X direction for the car to actually turn right on screen.
     const steerTarget =
-      (this.held.has(KEY_RIGHT) ? 1 : 0) - (this.held.has(KEY_LEFT) ? 1 : 0);
+      (this.held.has(KEY_LEFT) ? 1 : 0) - (this.held.has(KEY_RIGHT) ? 1 : 0);
     const throttleTarget = this.held.has(KEY_ACCELERATE) ? 1 : 0;
     const brakeTarget = this.held.has(KEY_BRAKE) ? 1 : 0;
     const clutchTarget = this.held.has(KEY_CLUTCH) ? 1 : 0;

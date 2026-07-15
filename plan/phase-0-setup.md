@@ -1,6 +1,6 @@
 # Phase 0 — Setup
 
-**Status:** In progress
+**Status:** Done
 **Requirements reference:** [docs/requirements.md §4, §12](../docs/requirements.md)
 
 ## Goal
@@ -24,7 +24,7 @@ Anything to do with the car, physics, controls, or content — this phase is pur
 - [x] Add Three.js dependency, render a basic scene (confirms rendering pipeline works)
 - [x] Add Rapier dependency (single-threaded WASM build), confirm it initializes without COOP/COEP headers
 - [x] Add GitHub Actions workflow: build + deploy to GitHub Pages on push to `main`
-- [ ] Confirm live GitHub Pages URL loads the empty scene — blocked on a GitHub remote existing and Pages being enabled; nothing to push to yet
+- [x] Confirm live GitHub Pages URL loads the empty scene — https://andymonis.github.io/gp2/, verified headless: 200 OK, scene renders, Rapier initializes, zero console errors
 - [x] Repo README updated with basic project description and dev commands (`npm install`, `npm run dev`, `npm run build`)
 
 ## Definition of done
@@ -33,4 +33,4 @@ Pushing to `main` results in an updated, live GitHub Pages build within a few mi
 
 ## Retrospective
 
-_(fill in once this phase is complete: what worked, what needed manual correction, time taken)_
+Scaffolding, Three.js/Rapier integration, CI workflow, and README were AI-driven end to end. Manual correction needed: creating the GitHub remote and pushing (requires the user's account — not something the agent can do), and enabling Pages in repo settings. Verification (headless browser check of both local dev server and the live Pages URL) was done by the agent to confirm actual rendering rather than just a successful build. Time taken: single session.

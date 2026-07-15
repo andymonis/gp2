@@ -4,8 +4,8 @@ Source of truth for where the project is. Update the status column whenever a ph
 
 | Phase | File | Status | Started | Completed |
 |---|---|---|---|---|
-| 0 — Setup | [phase-0-setup.md](phase-0-setup.md) | In progress | 2026-07-14 | |
-| 1 — Driving Feel PoC | [phase-1-driving-feel.md](phase-1-driving-feel.md) | Not started | | |
+| 0 — Setup | [phase-0-setup.md](phase-0-setup.md) | Done | 2026-07-14 | 2026-07-14 |
+| 1 — Driving Feel PoC | [phase-1-driving-feel.md](phase-1-driving-feel.md) | In progress | 2026-07-14 | |
 | 2 — First Track | [phase-2-first-track.md](phase-2-first-track.md) | Not started | | |
 | 3 — Audio | [phase-3-audio.md](phase-3-audio.md) | Not started | | |
 | 4 — Content Config | [phase-4-content-config.md](phase-4-content-config.md) | Not started | | |
@@ -24,4 +24,5 @@ When picking this back up:
 ## Log
 
 - 2026-07-13 — Requirements workshop completed ([docs/requirements.md](../docs/requirements.md)). Phase plan files created. Nothing implemented yet.
-- 2026-07-14 — Phase 0 scaffolded: Vite + TypeScript, Three.js scene rendering (verified headless, zero console errors), Rapier compat WASM initializing, GitHub Actions deploy workflow added, README updated. Remaining: create the GitHub remote, push, enable Pages, and confirm the live URL.
+- 2026-07-14 — Phase 0 done. Vite + TypeScript, Three.js scene rendering, Rapier compat WASM initializing, GitHub Actions deploy workflow, README updated. Repo pushed to github.com/andymonis/gp2, Pages enabled, live URL verified (https://andymonis.github.io/gp2/).
+- 2026-07-14 — Phase 1 engineering complete: low-poly car, ground+markers, custom grip-circle vehicle physics (raycast suspension, friction-circle tire model, sequential gearbox, standing-start clutch), cockpit camera, 3D dashboard. Verified via scripted headless playtest (standing start, launch, up/downshift, spin-out), zero console errors. Caught and fixed a serious bug (Rapier's addForce/addForceAtPoint persist across steps unless reset — was launching the car into orbit). Remaining: human playtesting to tune feel (see phase file retrospective).

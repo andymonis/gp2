@@ -83,10 +83,10 @@ flowchart LR
 
 | Key | Action |
 |---|---|
-| `z` | Turn left (ramped analog response) |
-| `x` | Turn right (ramped analog response) |
-| `'` | Accelerate (ramped analog response) |
-| `/` | Brake (ramped analog response) |
+| `,` | Turn left (ramped analog response) |
+| `.` | Turn right (ramped analog response) |
+| `a` | Accelerate (ramped analog response) |
+| `z` | Brake (ramped analog response) |
 | `space` | Context-sensitive gear shift: **gear up** if currently accelerating, **gear down** otherwise |
 | `shift` | Engage clutch (used for standing starts) |
 

@@ -1,7 +1,7 @@
-const KEY_LEFT = 'z';
-const KEY_RIGHT = 'x';
-const KEY_ACCELERATE = "'";
-const KEY_BRAKE = '/';
+const KEY_LEFT = ',';
+const KEY_RIGHT = '.';
+const KEY_ACCELERATE = 'a';
+const KEY_BRAKE = 'z';
 const KEY_SHIFT_TRIGGER = ' ';
 const KEY_CLUTCH = 'Shift';
 

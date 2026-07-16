@@ -1,7 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 
-export const GROUND_SIZE = 400;
+export const GROUND_SIZE = 6000;
 
 export function createGroundCollider(world: RAPIER.World) {
   const groundBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());

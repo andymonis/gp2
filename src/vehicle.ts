@@ -74,10 +74,9 @@ const REAR_ARB_STIFFNESS = 400000;
 // vs rear-axle average compression instead of left vs right - resists
 // pitch (nose-dive under braking, squat under acceleration) the same way a
 // real chassis's combined front/rear spring rates do. Needed because braking
-// force is now grip-limited rather than an arbitrary low cap (see
-// MAX_BRAKE_FORCE_PER_WHEEL) - hard braking can apply a much larger
-// pitching moment than before, and without this the rear could briefly lift
-// off entirely under heavy braking with no anti-dive resistance at all.
+// is grip-limited rather than an arbitrary low cap - hard braking can apply
+// a large pitching moment, and without this the rear could briefly lift off
+// entirely under heavy braking with no anti-dive resistance at all.
 const PITCH_ARB_STIFFNESS = 400000; // N per m of front/rear average compression difference
 
 // The ARBs above are the real, load-transfer-accurate roll/pitch resistance
@@ -108,11 +107,50 @@ const MAX_STEER_ANGLE = 0.5; // radians (~28.6deg), applied at a standstill
 const STEER_MIN_FACTOR = 0.18;
 const STEER_SCALE_KMH = 220;
 
-// High enough to never be the real limiter - braking should be grip-limited
-// (like a real car with strong brakes, more so once downforce is loading the
-// tires at speed), not capped by an arbitrary force ceiling well below what
-// the tires can actually take.
-const MAX_BRAKE_FORCE_PER_WHEEL = 40000; // N
+// --- Drivetrain: real per-wheel rotational inertia ---------------------
+// Wheel rotation used to be a pure kinematic readout of chassis ground
+// velocity (angularSpeed = groundSpeed / radius) with no independent
+// rotating mass - nothing smoothed the engine/clutch's view of wheel speed,
+// and braking was a direct tire-force hack that never touched the wheel at
+// all. Under hard braking in a high gear, a raycast miss could zero that
+// kinematic value in a single sub-step; the clutch model, reading it one
+// sub-step later with the deliberately tiny ENGINE_INERTIA_RPM, would then
+// crash engine rpm by tens of thousands of rpm/s trying to chase it -
+// exactly the resonance that made the rear wheels briefly lose ground
+// contact under hard high-speed braking. Giving each wheel real inertia
+// (this section) and integrating brake/drive/tire-reaction torque against
+// it, instead of applying an instant force, fixes that at the root.
+const WHEEL_INERTIA_FRONT = 0.6; // kg*m^2, ballpark for a ~9kg rotating assembly
+const WHEEL_INERTIA_REAR = 0.85; // kg*m^2, ballpark for a ~11kg rotating assembly
+
+// Longitudinal tire force per m/s of slip speed (wheel surface speed minus
+// ground speed) - deliberately linear-then-friction-circle-clamped (reusing
+// the same gripLimit/scale machinery as the lateral model) rather than a
+// realistic peaked slip curve, so there's no "wrong side of the peak" a
+// keyboard player without analog trail-braking could stumble onto. Mirrors
+// LATERAL_STIFFNESS's own convention (force per m/s of relative slip
+// velocity, not a slip ratio - no singularity at a standstill).
+//
+// Stability bound (same method as CLUTCH_SLIP_GAIN's derivation): the
+// reaction torque this creates is ~LONGITUDINAL_STIFFNESS * radius^2 * omega,
+// so explicit-Euler stability needs
+// LONGITUDINAL_STIFFNESS * radius^2 / wheelInertia * subDt < ~1.
+// At subDt=1/240s the front wheel (smaller inertia relative to its radius^2)
+// is the binding case, bound ~1429 - this value sits well under that with
+// real margin (unlike CLUTCH_SLIP_GAIN, tuned close to its edge; this term
+// exists specifically to fix an oscillation bug, so start over-damped).
+const LONGITUDINAL_STIFFNESS = 1200; // N per m/s of slip speed
+
+// A brake torque competes directly against the wheel's own tire-reaction
+// torque inside the wheel's own (small) inertia - unlike the old direct
+// tire-force cap, this can NOT just be set arbitrarily high "let the grip
+// circle sort it out": too high and wheels lock instantly at any speed,
+// defeating the point of this model. Calibrated so it exceeds the
+// (aero-downforce-scaled) reaction-torque ceiling at ~60mph (genuine lockup
+// achievable) but sits well under it at 146mph+ (wheel resists locking) -
+// a starting point requiring empirical iteration, same status AERO_DRAG_K
+// had.
+const MAX_BRAKE_TORQUE_PER_WHEEL = 1200; // Nm
 
 export const IDLE_RPM = 4000;
 export const REDLINE_RPM = 13000;
@@ -199,6 +237,7 @@ interface WheelDef {
   isLeft: boolean;
   isDriven: boolean;
   grip: number;
+  wheelInertia: number; // kg*m^2, about the spin axis
 }
 
 /** Result of one wheel's suspension raycast, before any force is applied. */
@@ -215,7 +254,9 @@ interface WheelRuntime {
   inContact: boolean;
   normalLoad: number; // suspension spring force - ride height support only
   gripLoad: number; // algebraic normal load used for the grip-circle limit
-  angularSpeed: number; // rad/s, cosmetic (assumes rolling without slip)
+  angularSpeed: number; // rad/s, real integrated wheel spin state (not a kinematic readout)
+  slipSpeed: number; // m/s, signed: wheel surface speed minus ground contact speed
+  locked: boolean; // true if the wheel has been braked to a stop while grounded
   steerAngle: number;
 }
 
@@ -225,6 +266,8 @@ export interface WheelVisualState {
   suspensionLength: number;
   normalLoad: number;
   gripLoad: number;
+  slipSpeed: number;
+  locked: boolean;
 }
 
 export interface VehicleTelemetry {
@@ -287,6 +330,7 @@ export class VehicleModel {
         isLeft: true,
         isDriven: false,
         grip: TIRE_GRIP_FRONT,
+        wheelInertia: WHEEL_INERTIA_FRONT,
       },
       frontRight: {
         mount: WHEEL_MOUNTS.frontRight,
@@ -295,6 +339,7 @@ export class VehicleModel {
         isLeft: false,
         isDriven: false,
         grip: TIRE_GRIP_FRONT,
+        wheelInertia: WHEEL_INERTIA_FRONT,
       },
       rearLeft: {
         mount: WHEEL_MOUNTS.rearLeft,
@@ -303,6 +348,7 @@ export class VehicleModel {
         isLeft: true,
         isDriven: true,
         grip: TIRE_GRIP_REAR,
+        wheelInertia: WHEEL_INERTIA_REAR,
       },
       rearRight: {
         mount: WHEEL_MOUNTS.rearRight,
@@ -311,6 +357,7 @@ export class VehicleModel {
         isLeft: false,
         isDriven: true,
         grip: TIRE_GRIP_REAR,
+        wheelInertia: WHEEL_INERTIA_REAR,
       },
     };
     this.wheelRuntime = {
@@ -402,12 +449,14 @@ export class VehicleModel {
       const rpmAccel = netEngineTorque / ENGINE_INERTIA_RPM;
       this.engineRpm = clamp(this.engineRpm + rpmAccel * subDt, 500, REDLINE_RPM);
 
-      // Only the rear (driven) wheels put power down - use their radius to
-      // convert wheel torque to force.
-      const drivingForceTotal =
-        this.gear > 0 ? (clutchTorque * overallRatio) / this.wheelDefs.rearLeft.radius : 0;
+      // Only the rear (driven) wheels put power down. This stays a torque
+      // (not converted to a force via /radius) - it now feeds each driven
+      // wheel's own rotational torque balance in stepTireForces, where the
+      // radius conversion happens implicitly through the slip/reaction-
+      // torque coupling instead of being front-loaded here.
+      const driveTorqueTotal = this.gear > 0 ? clutchTorque * overallRatio : 0;
       const drivenWheelCount = 2; // rearLeft + rearRight
-      const drivingForcePerWheel = drivingForceTotal / drivenWheelCount;
+      const driveTorquePerWheel = driveTorqueTotal / drivenWheelCount;
 
       // addForce/addForceAtPoint accumulate into a persistent per-body force
       // that Rapier keeps applying every subsequent step until reset -
@@ -547,10 +596,11 @@ export class VehicleModel {
       for (const name of WHEEL_NAMES) {
         this.stepTireForces(
           name,
+          subDt,
           input,
           chassisRot,
           suspension[name],
-          drivingForcePerWheel,
+          driveTorquePerWheel,
           steerScale,
           ax,
           ay,
@@ -663,13 +713,37 @@ export class VehicleModel {
     return { hit: true, contactPoint, springForce };
   }
 
+  /**
+   * Integrates one wheel's own spin under drive torque, brake torque, and
+   * (if grounded) the tire's reaction torque - a real rotating mass, not a
+   * kinematic readout. Brake torque is applied last as a clamped, bounded
+   * Coulomb-friction term (never overshoots past zero, never oscillates
+   * sign) so it can bring the wheel to a genuine, clean stop (lockup)
+   * without chattering right at that transition.
+   */
+  private integrateWheelSpin(
+    def: WheelDef,
+    currentOmega: number,
+    driveTorque: number,
+    reactionTorque: number,
+    brakeInput: number,
+    dt: number,
+  ): number {
+    const omegaWithoutBrake = currentOmega + ((driveTorque - reactionTorque) / def.wheelInertia) * dt;
+    const brakeTorqueMag = brakeInput * MAX_BRAKE_TORQUE_PER_WHEEL;
+    const maxBrakeDelta = (brakeTorqueMag / def.wheelInertia) * dt;
+    if (Math.abs(omegaWithoutBrake) <= maxBrakeDelta) return 0; // brake fully arrests remaining spin: locked
+    return omegaWithoutBrake - Math.sign(omegaWithoutBrake) * maxBrakeDelta;
+  }
+
   /** Steering + friction-circle tire force for one wheel, given its already-computed (and force-applied) suspension sample. */
   private stepTireForces(
     name: WheelName,
+    dt: number,
     input: InputState,
     chassisRot: THREE.Quaternion,
     suspension: SuspensionSample,
-    drivingForcePerWheel: number,
+    driveTorquePerWheel: number,
     steerScale: number,
     ax: number,
     ay: number,
@@ -677,12 +751,18 @@ export class VehicleModel {
   ) {
     const def = this.wheelDefs[name];
     const runtime = this.wheelRuntime[name];
+    const driveTorque = def.isDriven ? driveTorquePerWheel : 0;
 
     const steerAngle = def.isFront ? input.steer * MAX_STEER_ANGLE * steerScale : 0;
     runtime.steerAngle = steerAngle;
 
     if (!suspension.hit) {
-      runtime.angularSpeed = 0;
+      // Airborne: no ground reaction, no lateral force - the wheel still
+      // spins up/down under drive and brake torque alone.
+      runtime.angularSpeed = this.integrateWheelSpin(def, runtime.angularSpeed, driveTorque, 0, input.brake, dt);
+      runtime.slipSpeed = 0;
+      runtime.gripLoad = 0;
+      runtime.locked = false;
       return;
     }
 
@@ -694,8 +774,6 @@ export class VehicleModel {
     const contactVel = vecFromRapier(this.chassis.velocityAtPoint(suspension.contactPoint));
     const longSpeed = contactVel.dot(forwardWorld);
     const latSpeed = contactVel.dot(rightWorld);
-
-    runtime.angularSpeed = longSpeed / def.radius;
 
     // Algebraic normal load for the grip-circle limit: static weight share +
     // longitudinal/lateral weight transfer + aero downforce share, decoupled
@@ -720,17 +798,21 @@ export class VehicleModel {
     const gripLoad = Math.max(0, staticLoad + longTransfer + latTransfer + aeroLoad);
     runtime.gripLoad = gripLoad;
 
-    const brakeMagnitude = input.brake * MAX_BRAKE_FORCE_PER_WHEEL;
-    const brakeForce = Math.abs(longSpeed) > 0.15 ? -Math.sign(longSpeed) * brakeMagnitude : 0;
-    const engineForce = def.isDriven ? drivingForcePerWheel : 0;
-    const longDemand = engineForce + brakeForce;
+    // Longitudinal tire force from slip SPEED (wheel surface speed minus
+    // ground speed), not slip ratio - same convention as the lateral model
+    // just below (force per m/s of relative velocity), so no singularity at
+    // a standstill. Linear-then-friction-circle-clamped rather than a
+    // realistic peaked curve - see the LONGITUDINAL_STIFFNESS comment.
+    const slipSpeed = runtime.angularSpeed * def.radius - longSpeed;
+    runtime.slipSpeed = slipSpeed;
+    const rawLongDemand = LONGITUDINAL_STIFFNESS * slipSpeed;
     const latDemand = -LATERAL_STIFFNESS * latSpeed;
 
-    const demandMag = Math.hypot(longDemand, latDemand);
+    const demandMag = Math.hypot(rawLongDemand, latDemand);
     const gripLimit = def.grip * gripLoad;
     const scale = demandMag > gripLimit && demandMag > 0 ? gripLimit / demandMag : 1;
 
-    const longForce = longDemand * scale;
+    const longForce = rawLongDemand * scale;
     const latForce = latDemand * scale;
 
     const tireForce = forwardWorld
@@ -746,6 +828,22 @@ export class VehicleModel {
     // vertical support is the suspension's job alone.
     tireForce.y = 0;
     this.chassis.addForceAtPoint(tireForce, suspension.contactPoint, true);
+
+    // Newton's-3rd-law reaction of the tire force back onto the wheel: this
+    // is what actually slows/speeds the wheel's own spin as it does work on
+    // (or has work done on it by) the chassis - along with drive and brake
+    // torque, integrated by a real rotating mass instead of being read back
+    // out kinematically from chassis velocity.
+    const reactionTorque = longForce * def.radius;
+    runtime.angularSpeed = this.integrateWheelSpin(
+      def,
+      runtime.angularSpeed,
+      driveTorque,
+      reactionTorque,
+      input.brake,
+      dt,
+    );
+    runtime.locked = Math.abs(runtime.angularSpeed) < 0.5;
   }
 
   getTelemetry(): VehicleTelemetry {
@@ -760,6 +858,8 @@ export class VehicleModel {
         suspensionLength: runtime.suspensionLength,
         normalLoad: runtime.normalLoad,
         gripLoad: runtime.gripLoad,
+        slipSpeed: runtime.slipSpeed,
+        locked: runtime.locked,
       };
     }
     return {
@@ -787,6 +887,8 @@ function emptyWheelRuntime(): WheelRuntime {
     normalLoad: 0,
     gripLoad: 0,
     angularSpeed: 0,
+    slipSpeed: 0,
+    locked: false,
     steerAngle: 0,
   };
 }

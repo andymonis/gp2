@@ -146,13 +146,8 @@ const IDLE_GOVERNOR_GAIN = 0.4; // Nm per rpm below idle, pulls revs back up
 // at 1500rpm below idle - more than the engine's own peak torque), which was
 // silently out-fighting the brakes and pinning the car at a fixed "floor"
 // speed instead of letting it slow down. Capped so it can still nudge revs
-// back to idle after a small dip (e.g. a gearshift) without being able to
-// resist a real stall.
+// back toward idle without being able to resist heavy braking indefinitely.
 const IDLE_ASSIST_MAX_NM = 60;
-// Engine dies if dragged below this rpm while still mechanically coupled
-// (clutch mostly released, in gear) - same as lugging a real manual car to a
-// stall under hard braking without clutching in. Restart via tryStartEngine().
-const STALL_RPM = 1200;
 // Nm per rpm above idle, off-throttle engine braking. Applied unconditionally
 // (not just off-throttle), so it also acts as a parasitic loss at full
 // throttle - kept small so it doesn't eat a large fraction of peak torque at
@@ -243,7 +238,6 @@ export interface VehicleTelemetry {
   pitchDeg: number;
   aeroDownforceN: number;
   aeroDragN: number;
-  stalled: boolean;
   wheels: Record<WheelName, WheelVisualState>;
 }
 
@@ -267,7 +261,6 @@ export class VehicleModel {
   private lastAeroDragN = 0;
   private lastRollDeg = 0;
   private lastPitchDeg = 0;
-  private stalled = false;
 
   constructor(world: RAPIER.World, spawnPosition: THREE.Vector3) {
     this.world = world;
@@ -335,14 +328,6 @@ export class VehicleModel {
     }
   }
 
-  /** Restarts a stalled engine - requires the clutch pedal to be mostly depressed, like a real starter motor. */
-  tryStartEngine(startTriggered: boolean, clutch: number) {
-    if (startTriggered && this.stalled && clutch > 0.5) {
-      this.stalled = false;
-      this.engineRpm = IDLE_RPM;
-    }
-  }
-
   step(dt: number, input: InputState) {
     this.lastThrottle = input.throttle;
     this.lastBrake = input.brake;
@@ -379,65 +364,48 @@ export class VehicleModel {
     const subDt = dt / PHYSICS_SUBSTEPS;
     this.world.integrationParameters.dt = subDt;
     for (let i = 0; i < PHYSICS_SUBSTEPS; i++) {
-      let clutchTorque = 0;
-      if (!this.stalled) {
-        // Wheel-derived "engine-equivalent" rpm: what the engine would be
-        // spinning at if perfectly locked to the current wheel speed in this
-        // gear. Uses last substep's wheel angular speed (available from
-        // wheelRuntime), same lagged-state pattern already used for
-        // suspension damping.
-        const drivenAngSpeed =
-          (this.wheelRuntime.rearLeft.angularSpeed + this.wheelRuntime.rearRight.angularSpeed) / 2;
-        const wheelEquivRpm =
-          this.gear > 0 ? Math.abs(drivenAngSpeed) * overallRatio * (60 / (2 * Math.PI)) : this.engineRpm;
+      // Wheel-derived "engine-equivalent" rpm: what the engine would be
+      // spinning at if perfectly locked to the current wheel speed in this
+      // gear. Uses last substep's wheel angular speed (available from
+      // wheelRuntime), same lagged-state pattern already used for suspension
+      // damping.
+      const drivenAngSpeed =
+        (this.wheelRuntime.rearLeft.angularSpeed + this.wheelRuntime.rearRight.angularSpeed) / 2;
+      const wheelEquivRpm =
+        this.gear > 0 ? Math.abs(drivenAngSpeed) * overallRatio * (60 / (2 * Math.PI)) : this.engineRpm;
 
-        // Clutch as a torque-limited friction coupling (not an instant
-        // lock/unlock): while there's a big rpm gap it transmits its max
-        // capacity (like a slipping friction plate), letting a revved engine
-        // actually launch the car; once rpm gaps close, it locks solid.
-        const clutchCapacity = this.gear > 0 ? CLUTCH_MAX_TORQUE_NM * (1 - input.clutch) : 0;
-        const slipRpm = this.engineRpm - wheelEquivRpm;
-        clutchTorque = clamp(CLUTCH_SLIP_GAIN * slipRpm, -clutchCapacity, clutchCapacity);
+      // Clutch as a torque-limited friction coupling (not an instant
+      // lock/unlock): while there's a big rpm gap it transmits its max
+      // capacity (like a slipping friction plate), letting a revved engine
+      // actually launch the car; once rpm gaps close, it locks solid.
+      const clutchCapacity = this.gear > 0 ? CLUTCH_MAX_TORQUE_NM * (1 - input.clutch) : 0;
+      const slipRpm = this.engineRpm - wheelEquivRpm;
+      const clutchTorque = clamp(CLUTCH_SLIP_GAIN * slipRpm, -clutchCapacity, clutchCapacity);
 
-        const throttleTorque = engineTorqueNm(this.engineRpm) * input.throttle;
-        const idleAssist =
-          this.engineRpm < IDLE_RPM
-            ? Math.min((IDLE_RPM - this.engineRpm) * IDLE_GOVERNOR_GAIN, IDLE_ASSIST_MAX_NM)
-            : 0;
-        const engineFriction = Math.max(0, this.engineRpm - IDLE_RPM) * ENGINE_FRICTION_GAIN;
-        const netEngineTorque = throttleTorque + idleAssist - engineFriction - clutchTorque;
+      const throttleTorque = engineTorqueNm(this.engineRpm) * input.throttle;
+      // Capped so it can nudge revs back to idle after a small dip (e.g. a
+      // gearshift) without being able to out-fight heavy braking the way an
+      // uncapped gain previously did - see IDLE_ASSIST_MAX_NM.
+      const idleAssist =
+        this.engineRpm < IDLE_RPM
+          ? Math.min((IDLE_RPM - this.engineRpm) * IDLE_GOVERNOR_GAIN, IDLE_ASSIST_MAX_NM)
+          : 0;
+      const engineFriction = Math.max(0, this.engineRpm - IDLE_RPM) * ENGINE_FRICTION_GAIN;
+      const netEngineTorque = throttleTorque + idleAssist - engineFriction - clutchTorque;
 
-        const rpmAccel = netEngineTorque / ENGINE_INERTIA_RPM;
-        const nextRpm = this.engineRpm + rpmAccel * subDt;
-
-        // A real engine stalls if it's dragged down hard (e.g. heavy braking
-        // in gear) while still mechanically coupled through the clutch - the
-        // idle governor above is deliberately capped so it can't out-fight
-        // that load indefinitely the way an uncapped gain previously did
-        // (pinning the car at a fixed "floor" speed instead of letting it
-        // slow down). Only restartable via tryStartEngine().
-        if (this.gear > 0 && input.clutch < 0.5 && nextRpm <= STALL_RPM) {
-          this.stalled = true;
-          this.engineRpm = 0;
-          clutchTorque = 0;
-        } else {
-          // Nominal safety floor here, not IDLE_RPM: a heavily-lugged engine
-          // (e.g. clutch locked to a low wheel speed) should be able to dip
-          // below idle, recovering via idleAssist torque rather than being
-          // artificially pinned - a hard idle floor would mask that as a
-          // misleading flat 4000rpm readout even while the car is clearly
-          // still accelerating.
-          this.engineRpm = clamp(nextRpm, 500, REDLINE_RPM);
-        }
-      }
+      // Only a nominal safety floor here, not IDLE_RPM: a heavily-lugged
+      // engine (e.g. clutch locked to a low wheel speed) should be able to
+      // dip below idle, recovering via idleAssist torque rather than being
+      // artificially pinned - a hard idle floor would mask that as a
+      // misleading flat 4000rpm readout even while the car is clearly still
+      // accelerating.
+      const rpmAccel = netEngineTorque / ENGINE_INERTIA_RPM;
+      this.engineRpm = clamp(this.engineRpm + rpmAccel * subDt, 500, REDLINE_RPM);
 
       // Only the rear (driven) wheels put power down - use their radius to
-      // convert wheel torque to force. Zero while stalled - a dead engine
-      // can't drive the wheels.
+      // convert wheel torque to force.
       const drivingForceTotal =
-        !this.stalled && this.gear > 0
-          ? (clutchTorque * overallRatio) / this.wheelDefs.rearLeft.radius
-          : 0;
+        this.gear > 0 ? (clutchTorque * overallRatio) / this.wheelDefs.rearLeft.radius : 0;
       const drivenWheelCount = 2; // rearLeft + rearRight
       const drivingForcePerWheel = drivingForceTotal / drivenWheelCount;
 
@@ -805,7 +773,6 @@ export class VehicleModel {
       pitchDeg: this.lastPitchDeg,
       aeroDownforceN: this.lastAeroDownforceN,
       aeroDragN: this.lastAeroDragN,
-      stalled: this.stalled,
       wheels,
     };
   }

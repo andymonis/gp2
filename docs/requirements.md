@@ -76,7 +76,7 @@ flowchart LR
 - **Aerodynamics:** speed-squared downforce and drag, calibrated to real 1990-era figures (~2000kg downforce at 150mph). Downforce feeds tire grip algebraically (decoupled from suspension spring force, which stays deliberately stiff/short-travel); drag is a real applied force. See [phase-1-driving-feel.md](../plan/phase-1-driving-feel.md) retrospective.
 - **Explicitly excluded (for now):** tire wear, fuel load, mechanical damage.
 - **Gearbox:** sequential, manual. No clutch modeling required for normal up/down shifts.
-- **Clutch:** modeled only for standing starts — holding the clutch key allows revving without stalling/launching; releasing it engages drive.
+- **Clutch:** modeled for standing starts (holding the clutch key allows revving without stalling/launching) and can also stall — dragging the engine rpm down too far under load (e.g. hard braking without clutching in) kills the engine, same as a real manual car; restart with the clutch held and the starter key (`t`).
 - **Driving aids:** none in initial phases; may be added later as an option.
 
 ## 6. Controls
@@ -88,7 +88,8 @@ flowchart LR
 | `'` | Accelerate (ramped analog response) |
 | `/` | Brake (ramped analog response) |
 | `space` | Context-sensitive gear shift: **gear up** if currently accelerating, **gear down** otherwise |
-| `shift` | Engage clutch (used for standing starts) |
+| `shift` | Engage clutch (used for standing starts, and to restart a stalled engine) |
+| `t` | Starter motor - restarts a stalled engine (requires clutch held) |
 
 All digital key inputs are ramped toward their target value rather than applied instantly, to keep the grip-circle physics controllable.
 

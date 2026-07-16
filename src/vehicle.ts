@@ -54,19 +54,51 @@ const WHEELBASE = WHEEL_MOUNTS.frontLeft.z - WHEEL_MOUNTS.rearLeft.z;
 const FRONT_TRACK = WHEEL_MOUNTS.frontRight.x - WHEEL_MOUNTS.frontLeft.x;
 const REAR_TRACK = WHEEL_MOUNTS.rearRight.x - WHEEL_MOUNTS.rearLeft.x;
 
-// Explicit anti-roll/anti-pitch corrective torque, axis-isolated from yaw.
-// The suspension's natural restoring torque (from independent per-wheel
-// raycasts) is weak relative to the lateral forces the new grip/aero numbers
-// allow, and it's further weakened by the grip/spring-force decoupling above
-// (the spring never "sees" the algebraic aero/lateral load) - so without
-// this, hard cornering visibly rolls/pitches the chassis. Global angular
-// damping is deliberately left alone since it's a single scalar across all 3
-// axes and would also dull the twitchy yaw response.
-const ROLL_STIFFNESS_NM_PER_RAD = 150000;
-const ROLL_DAMPING_NM_PER_RAD_S = 18000;
-const PITCH_STIFFNESS_NM_PER_RAD = 130000;
-const PITCH_DAMPING_NM_PER_RAD_S = 16000;
-const ROLL_PITCH_TORQUE_MAX_NM = 100000; // safety cap, same pattern as SUSPENSION_MAX_FORCE
+// Anti-roll bars: real forces coupling each axle's left/right suspension
+// compression, the standard mechanism real cars use to resist roll - extra
+// force added to the more-compressed (loaded) side and removed from the
+// less-compressed side, proportional to the compression difference. This
+// replaces an earlier whole-body corrective torque that forced the chassis
+// to a level orientation regardless of what the wheels were actually doing:
+// with independent per-wheel springs alone (too soft relative to the lateral
+// forces the new grip/aero numbers allow) the torque could hold the chassis
+// dead level while both inside wheels were genuinely airborne (raycast
+// miss), which reads as the car floating/sliding sideways rather than
+// leaning into a corner like a real car. An ARB is a real, physical force at
+// the wheel contact points - it can't produce that disconnect between what
+// the chassis looks like and what the wheels are actually doing.
+const FRONT_ARB_STIFFNESS = 400000; // N per m of left/right compression difference
+const REAR_ARB_STIFFNESS = 400000;
+
+// Same real-force mechanism as the roll ARBs above, but coupling front-axle
+// vs rear-axle average compression instead of left vs right - resists
+// pitch (nose-dive under braking, squat under acceleration) the same way a
+// real chassis's combined front/rear spring rates do. Needed because braking
+// force is now grip-limited rather than an arbitrary low cap (see
+// MAX_BRAKE_FORCE_PER_WHEEL) - hard braking can apply a much larger
+// pitching moment than before, and without this the rear could briefly lift
+// off entirely under heavy braking with no anti-dive resistance at all.
+const PITCH_ARB_STIFFNESS = 400000; // N per m of front/rear average compression difference
+
+// The ARBs above are the real, load-transfer-accurate roll/pitch resistance
+// and are the dominant mechanism while all 4 wheels are grounded - but an
+// ARB only reacts to an actual left/right (or front/rear) compression
+// difference, so once a wheel genuinely lifts off it disengages entirely,
+// leaving nothing pulling the chassis back toward level while airborne on
+// one side. Two extra terms cover that gap:
+// - Pure rate damping (no angle term) prevents a moderate steering input
+//   from growing into an uncontrolled spin/flip in the moments before the
+//   ARBs' load-transfer response engages.
+// - A deliberately weak angle-restoring term (~6x weaker than the old
+//   whole-body corrective torque these replaced) biases the car back toward
+//   level once a hard corner eases, without being strong enough to visibly
+//   hold the chassis flat while it's genuinely unsupported - which was the
+//   original "floating on two wheels" bug: a real car's weight pulls it back
+//   down long before a term this weak could fight that.
+const ROLL_STIFFNESS_NM_PER_RAD = 60000;
+const PITCH_STIFFNESS_NM_PER_RAD = 50000;
+const ROLL_RATE_DAMPING_NM_PER_RAD_S = 25000;
+const PITCH_RATE_DAMPING_NM_PER_RAD_S = 22000;
 
 const MAX_STEER_ANGLE = 0.5; // radians (~28.6deg), applied at a standstill
 // Speed-sensitive steering: available steer angle is scaled down linearly as
@@ -76,7 +108,11 @@ const MAX_STEER_ANGLE = 0.5; // radians (~28.6deg), applied at a standstill
 const STEER_MIN_FACTOR = 0.18;
 const STEER_SCALE_KMH = 220;
 
-const MAX_BRAKE_FORCE_PER_WHEEL = 5200; // N
+// High enough to never be the real limiter - braking should be grip-limited
+// (like a real car with strong brakes, more so once downforce is loading the
+// tires at speed), not capped by an arbitrary force ceiling well below what
+// the tires can actually take.
+const MAX_BRAKE_FORCE_PER_WHEEL = 40000; // N
 
 export const IDLE_RPM = 4000;
 export const REDLINE_RPM = 13000;
@@ -105,6 +141,18 @@ const CLUTCH_MAX_TORQUE_NM = 700;
 // braking every sub-step. This value sits close to the fast-but-stable edge.
 const CLUTCH_SLIP_GAIN = 2;
 const IDLE_GOVERNOR_GAIN = 0.4; // Nm per rpm below idle, pulls revs back up
+// Uncapped, this linear gain produces absurd torque once the engine is
+// dragged far below idle by a locked clutch under hard braking (e.g. ~600Nm
+// at 1500rpm below idle - more than the engine's own peak torque), which was
+// silently out-fighting the brakes and pinning the car at a fixed "floor"
+// speed instead of letting it slow down. Capped so it can still nudge revs
+// back to idle after a small dip (e.g. a gearshift) without being able to
+// resist a real stall.
+const IDLE_ASSIST_MAX_NM = 60;
+// Engine dies if dragged below this rpm while still mechanically coupled
+// (clutch mostly released, in gear) - same as lugging a real manual car to a
+// stall under hard braking without clutching in. Restart via tryStartEngine().
+const STALL_RPM = 1200;
 // Nm per rpm above idle, off-throttle engine braking. Applied unconditionally
 // (not just off-throttle), so it also acts as a parasitic loss at full
 // throttle - kept small so it doesn't eat a large fraction of peak torque at
@@ -158,6 +206,13 @@ interface WheelDef {
   grip: number;
 }
 
+/** Result of one wheel's suspension raycast, before any force is applied. */
+interface SuspensionSample {
+  hit: boolean;
+  contactPoint: THREE.Vector3;
+  springForce: number;
+}
+
 interface WheelRuntime {
   suspensionLength: number;
   compression: number;
@@ -188,6 +243,7 @@ export interface VehicleTelemetry {
   pitchDeg: number;
   aeroDownforceN: number;
   aeroDragN: number;
+  stalled: boolean;
   wheels: Record<WheelName, WheelVisualState>;
 }
 
@@ -211,6 +267,7 @@ export class VehicleModel {
   private lastAeroDragN = 0;
   private lastRollDeg = 0;
   private lastPitchDeg = 0;
+  private stalled = false;
 
   constructor(world: RAPIER.World, spawnPosition: THREE.Vector3) {
     this.world = world;
@@ -278,6 +335,14 @@ export class VehicleModel {
     }
   }
 
+  /** Restarts a stalled engine - requires the clutch pedal to be mostly depressed, like a real starter motor. */
+  tryStartEngine(startTriggered: boolean, clutch: number) {
+    if (startTriggered && this.stalled && clutch > 0.5) {
+      this.stalled = false;
+      this.engineRpm = IDLE_RPM;
+    }
+  }
+
   step(dt: number, input: InputState) {
     this.lastThrottle = input.throttle;
     this.lastBrake = input.brake;
@@ -314,43 +379,65 @@ export class VehicleModel {
     const subDt = dt / PHYSICS_SUBSTEPS;
     this.world.integrationParameters.dt = subDt;
     for (let i = 0; i < PHYSICS_SUBSTEPS; i++) {
-      // Wheel-derived "engine-equivalent" rpm: what the engine would be
-      // spinning at if perfectly locked to the current wheel speed in this
-      // gear. Uses last substep's wheel angular speed (available from
-      // wheelRuntime), same lagged-state pattern already used for suspension
-      // damping.
-      const drivenAngSpeed =
-        (this.wheelRuntime.rearLeft.angularSpeed + this.wheelRuntime.rearRight.angularSpeed) / 2;
-      const wheelEquivRpm =
-        this.gear > 0 ? Math.abs(drivenAngSpeed) * overallRatio * (60 / (2 * Math.PI)) : this.engineRpm;
+      let clutchTorque = 0;
+      if (!this.stalled) {
+        // Wheel-derived "engine-equivalent" rpm: what the engine would be
+        // spinning at if perfectly locked to the current wheel speed in this
+        // gear. Uses last substep's wheel angular speed (available from
+        // wheelRuntime), same lagged-state pattern already used for
+        // suspension damping.
+        const drivenAngSpeed =
+          (this.wheelRuntime.rearLeft.angularSpeed + this.wheelRuntime.rearRight.angularSpeed) / 2;
+        const wheelEquivRpm =
+          this.gear > 0 ? Math.abs(drivenAngSpeed) * overallRatio * (60 / (2 * Math.PI)) : this.engineRpm;
 
-      // Clutch as a torque-limited friction coupling (not an instant
-      // lock/unlock): while there's a big rpm gap it transmits its max
-      // capacity (like a slipping friction plate), letting a revved engine
-      // actually launch the car; once rpm gaps close, it locks solid.
-      const clutchCapacity = this.gear > 0 ? CLUTCH_MAX_TORQUE_NM * (1 - input.clutch) : 0;
-      const slipRpm = this.engineRpm - wheelEquivRpm;
-      const clutchTorque = clamp(CLUTCH_SLIP_GAIN * slipRpm, -clutchCapacity, clutchCapacity);
+        // Clutch as a torque-limited friction coupling (not an instant
+        // lock/unlock): while there's a big rpm gap it transmits its max
+        // capacity (like a slipping friction plate), letting a revved engine
+        // actually launch the car; once rpm gaps close, it locks solid.
+        const clutchCapacity = this.gear > 0 ? CLUTCH_MAX_TORQUE_NM * (1 - input.clutch) : 0;
+        const slipRpm = this.engineRpm - wheelEquivRpm;
+        clutchTorque = clamp(CLUTCH_SLIP_GAIN * slipRpm, -clutchCapacity, clutchCapacity);
 
-      const throttleTorque = engineTorqueNm(this.engineRpm) * input.throttle;
-      const idleAssist =
-        this.engineRpm < IDLE_RPM ? (IDLE_RPM - this.engineRpm) * IDLE_GOVERNOR_GAIN : 0;
-      const engineFriction = Math.max(0, this.engineRpm - IDLE_RPM) * ENGINE_FRICTION_GAIN;
-      const netEngineTorque = throttleTorque + idleAssist - engineFriction - clutchTorque;
+        const throttleTorque = engineTorqueNm(this.engineRpm) * input.throttle;
+        const idleAssist =
+          this.engineRpm < IDLE_RPM
+            ? Math.min((IDLE_RPM - this.engineRpm) * IDLE_GOVERNOR_GAIN, IDLE_ASSIST_MAX_NM)
+            : 0;
+        const engineFriction = Math.max(0, this.engineRpm - IDLE_RPM) * ENGINE_FRICTION_GAIN;
+        const netEngineTorque = throttleTorque + idleAssist - engineFriction - clutchTorque;
 
-      // Only a nominal safety floor here, not IDLE_RPM: a heavily-lugged
-      // engine (e.g. clutch locked to a low wheel speed) should be able to
-      // dip below idle, recovering via idleAssist torque rather than being
-      // artificially pinned - a hard idle floor would mask that as a
-      // misleading flat 4000rpm readout even while the car is clearly still
-      // accelerating.
-      const rpmAccel = netEngineTorque / ENGINE_INERTIA_RPM;
-      this.engineRpm = clamp(this.engineRpm + rpmAccel * subDt, 500, REDLINE_RPM);
+        const rpmAccel = netEngineTorque / ENGINE_INERTIA_RPM;
+        const nextRpm = this.engineRpm + rpmAccel * subDt;
+
+        // A real engine stalls if it's dragged down hard (e.g. heavy braking
+        // in gear) while still mechanically coupled through the clutch - the
+        // idle governor above is deliberately capped so it can't out-fight
+        // that load indefinitely the way an uncapped gain previously did
+        // (pinning the car at a fixed "floor" speed instead of letting it
+        // slow down). Only restartable via tryStartEngine().
+        if (this.gear > 0 && input.clutch < 0.5 && nextRpm <= STALL_RPM) {
+          this.stalled = true;
+          this.engineRpm = 0;
+          clutchTorque = 0;
+        } else {
+          // Nominal safety floor here, not IDLE_RPM: a heavily-lugged engine
+          // (e.g. clutch locked to a low wheel speed) should be able to dip
+          // below idle, recovering via idleAssist torque rather than being
+          // artificially pinned - a hard idle floor would mask that as a
+          // misleading flat 4000rpm readout even while the car is clearly
+          // still accelerating.
+          this.engineRpm = clamp(nextRpm, 500, REDLINE_RPM);
+        }
+      }
 
       // Only the rear (driven) wheels put power down - use their radius to
-      // convert wheel torque to force.
+      // convert wheel torque to force. Zero while stalled - a dead engine
+      // can't drive the wheels.
       const drivingForceTotal =
-        this.gear > 0 ? (clutchTorque * overallRatio) / this.wheelDefs.rearLeft.radius : 0;
+        !this.stalled && this.gear > 0
+          ? (clutchTorque * overallRatio) / this.wheelDefs.rearLeft.radius
+          : 0;
       const drivenWheelCount = 2; // rearLeft + rearRight
       const drivingForcePerWheel = drivingForceTotal / drivenWheelCount;
 
@@ -367,11 +454,13 @@ export class VehicleModel {
       const speedMs = linvel.length();
       const speedKmh = speedMs * 3.6;
       const steerScale = clamp(1 - speedKmh / STEER_SCALE_KMH, STEER_MIN_FACTOR, 1);
+      this.lastRollDeg = THREE.MathUtils.radToDeg(axes.rollAngle);
+      this.lastPitchDeg = THREE.MathUtils.radToDeg(axes.pitchAngle);
 
-      // Aero: downforce feeds the algebraic per-wheel grip load (in
-      // stepWheel) rather than being applied as a real force - see the
-      // constants comment above for why. Drag IS a real applied force
-      // (horizontal, no suspension-capacity conflict).
+      // Aero: downforce feeds the algebraic per-wheel grip load (below)
+      // rather than being applied as a real force - see the constants
+      // comment above for why. Drag IS a real applied force (horizontal, no
+      // suspension-capacity conflict).
       const downforceTotal = AERO_DOWNFORCE_K * speedMs * speedMs;
       const dragMag = AERO_DRAG_K * speedMs * speedMs;
       this.lastAeroDownforceN = downforceTotal;
@@ -380,34 +469,119 @@ export class VehicleModel {
         this.chassis.addForce(linvel.clone().normalize().multiplyScalar(-dragMag), true);
       }
 
-      // Explicit anti-roll/anti-pitch corrective torque, axis-isolated from
-      // yaw - see the constants comment above for why this is needed.
+      // Roll/pitch rate damping plus a deliberately weak angle-restoring
+      // term - see the constants comment above for why both are needed on
+      // top of the ARBs.
       const angvel = vecFromRapier(this.chassis.angvel());
       const rollRate = angvel.dot(axes.forward);
       const pitchRate = angvel.dot(axes.right);
       const rollTorqueMag =
-        -axes.rollAngle * ROLL_STIFFNESS_NM_PER_RAD - rollRate * ROLL_DAMPING_NM_PER_RAD_S;
+        axes.rollAngle * ROLL_STIFFNESS_NM_PER_RAD - rollRate * ROLL_RATE_DAMPING_NM_PER_RAD_S;
       const pitchTorqueMag =
-        -axes.pitchAngle * PITCH_STIFFNESS_NM_PER_RAD - pitchRate * PITCH_DAMPING_NM_PER_RAD_S;
-      const correctiveTorque = axes.forward
+        axes.pitchAngle * PITCH_STIFFNESS_NM_PER_RAD - pitchRate * PITCH_RATE_DAMPING_NM_PER_RAD_S;
+      const dampingTorque = axes.forward
         .clone()
         .multiplyScalar(rollTorqueMag)
         .add(axes.right.clone().multiplyScalar(pitchTorqueMag));
-      if (correctiveTorque.length() > ROLL_PITCH_TORQUE_MAX_NM) {
-        correctiveTorque.setLength(ROLL_PITCH_TORQUE_MAX_NM);
+      this.chassis.addTorque(dampingTorque, true);
+
+      // Suspension raycasts for all 4 wheels first (no force applied yet) so
+      // the anti-roll bars below can react to the real left/right compression
+      // difference for each axle before any force is pushed to the chassis.
+      const suspension = {} as Record<WheelName, SuspensionSample>;
+      for (const name of WHEEL_NAMES) {
+        suspension[name] = this.computeSuspension(name, chassisRot, chassisPos, axes.up, subDt);
       }
-      this.chassis.addTorque(correctiveTorque, true);
-      this.lastRollDeg = THREE.MathUtils.radToDeg(axes.rollAngle);
-      this.lastPitchDeg = THREE.MathUtils.radToDeg(axes.pitchAngle);
+
+      // An airborne wheel's compression is a fixed sentinel
+      // (-SUSPENSION_MAX_TRAVEL, see computeSuspension's no-hit branch), not
+      // a continuously-extrapolated value - reacting to it as a real
+      // compression difference would inject a force spike into the ARBs at
+      // the exact instant a wheel loses contact (whatever it jumps from, to
+      // that sentinel). Both wheels on an axle must be grounded for that
+      // axle's ARB to engage; a lifted wheel just falls back to independent
+      // per-wheel spring behavior, same as with no ARB at all.
+      const ARB_FORCE_MAX = 20000; // safety cap, mirrors SUSPENSION_MAX_FORCE
+      const frontBothGrounded = suspension.frontLeft.hit && suspension.frontRight.hit;
+      const rearBothGrounded = suspension.rearLeft.hit && suspension.rearRight.hit;
+
+      let flForce = suspension.frontLeft.hit ? suspension.frontLeft.springForce : 0;
+      let frForce = suspension.frontRight.hit ? suspension.frontRight.springForce : 0;
+      let rlForce = suspension.rearLeft.hit ? suspension.rearLeft.springForce : 0;
+      let rrForce = suspension.rearRight.hit ? suspension.rearRight.springForce : 0;
+
+      // A real anti-roll/anti-pitch bar only *redistributes* force between
+      // the two ends it connects - it has no external power source, so the
+      // total force across the pair must stay exactly constant. Clamping
+      // each side's contribution independently at >=0 (as an earlier version
+      // of this code did) silently discarded the "negative" half of that
+      // redistribution while keeping the "positive" half in full, injecting
+      // real net extra force into the chassis on every corner - enough to
+      // visibly launch and spin the car under nothing more than a moderate
+      // steering input. transferTo() below caps the transfer at what the
+      // donor side actually has, so the pair's total is always conserved.
+      if (frontBothGrounded) {
+        const desired = clamp(
+          FRONT_ARB_STIFFNESS * (this.wheelRuntime.frontLeft.compression - this.wheelRuntime.frontRight.compression),
+          -ARB_FORCE_MAX,
+          ARB_FORCE_MAX,
+        );
+        [flForce, frForce] = transferForce(flForce, frForce, desired);
+      }
+      if (rearBothGrounded) {
+        const desired = clamp(
+          REAR_ARB_STIFFNESS * (this.wheelRuntime.rearLeft.compression - this.wheelRuntime.rearRight.compression),
+          -ARB_FORCE_MAX,
+          ARB_FORCE_MAX,
+        );
+        [rlForce, rrForce] = transferForce(rlForce, rrForce, desired);
+      }
+      if (frontBothGrounded && rearBothGrounded) {
+        const frontAvgCompression =
+          (this.wheelRuntime.frontLeft.compression + this.wheelRuntime.frontRight.compression) / 2;
+        const rearAvgCompression =
+          (this.wheelRuntime.rearLeft.compression + this.wheelRuntime.rearRight.compression) / 2;
+        const desired = clamp(
+          PITCH_ARB_STIFFNESS * (frontAvgCompression - rearAvgCompression),
+          -ARB_FORCE_MAX,
+          ARB_FORCE_MAX,
+        );
+        const frontTotal = flForce + frForce;
+        const rearTotal = rlForce + rrForce;
+        const [newFrontTotal, newRearTotal] = transferForce(frontTotal, rearTotal, desired);
+        // Redistribute each axle's new total back across its own two wheels,
+        // preserving whatever roll split was just computed above.
+        if (frontTotal > 0) {
+          const ratio = newFrontTotal / frontTotal;
+          flForce *= ratio;
+          frForce *= ratio;
+        }
+        if (rearTotal > 0) {
+          const ratio = newRearTotal / rearTotal;
+          rlForce *= ratio;
+          rrForce *= ratio;
+        }
+      }
+
+      const finalForce: Record<WheelName, number> = {
+        frontLeft: flForce,
+        frontRight: frForce,
+        rearLeft: rlForce,
+        rearRight: rrForce,
+      };
+      for (const name of WHEEL_NAMES) {
+        const sample = suspension[name];
+        if (!sample.hit) continue;
+        this.wheelRuntime[name].normalLoad = finalForce[name];
+        this.chassis.addForceAtPoint(axes.up.clone().multiplyScalar(finalForce[name]), sample.contactPoint, true);
+      }
 
       for (const name of WHEEL_NAMES) {
-        this.stepWheel(
+        this.stepTireForces(
           name,
-          subDt,
           input,
           chassisRot,
-          chassisPos,
-          axes.up,
+          suspension[name],
           drivingForcePerWheel,
           steerScale,
           ax,
@@ -420,29 +594,43 @@ export class VehicleModel {
     }
   }
 
-  /** World-space forward/right/up axes and roll/pitch tilt for the chassis. Shared by the anti-roll torque and telemetry. */
+  /** World-space forward/right/up axes and roll/pitch tilt for the chassis. Shared by the rate-damping torque and telemetry. */
   private getChassisAxes(chassisRot: THREE.Quaternion) {
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(chassisRot);
     const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(chassisRot);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(chassisRot);
-    const rollAngle = Math.asin(clamp(up.dot(right), -1, 1));
-    const pitchAngle = Math.asin(clamp(-up.dot(forward), -1, 1));
+
+    // Roll/pitch angle relative to the chassis's own yaw-only heading, NOT
+    // its fully-rotated forward/right above: up.dot(right) and up.dot(forward)
+    // are dot products between two vectors of the SAME rotated orthonormal
+    // basis, which are mathematically always exactly 0 regardless of the
+    // rotation applied (rotation preserves orthogonality) - a formula built
+    // on either one can never report anything but ~0 no matter how far the
+    // chassis has actually banked. Extract yaw first, build a horizontal
+    // (roll/pitch-free) reference frame from it, and measure "up" against
+    // that instead.
+    const yaw = Math.atan2(forward.x, forward.z);
+    const headingForward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    const headingRight = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const rollAngle = Math.asin(clamp(up.dot(headingRight), -1, 1));
+    const pitchAngle = Math.asin(clamp(-up.dot(headingForward), -1, 1));
+
     return { up, forward, right, rollAngle, pitchAngle };
   }
 
-  private stepWheel(
+  /**
+   * Raycasts one wheel and computes its suspension spring force, without
+   * applying any force yet - split out from the old combined stepWheel so
+   * the anti-roll bars (in step()) can see every wheel's compression before
+   * any vertical force is pushed to the chassis.
+   */
+  private computeSuspension(
     name: WheelName,
-    dt: number,
-    input: InputState,
     chassisRot: THREE.Quaternion,
     chassisPos: THREE.Vector3,
     localUp: THREE.Vector3,
-    drivingForcePerWheel: number,
-    steerScale: number,
-    ax: number,
-    ay: number,
-    downforceTotal: number,
-  ) {
+    dt: number,
+  ): SuspensionSample {
     const def = this.wheelDefs[name];
     const runtime = this.wheelRuntime[name];
 
@@ -468,8 +656,7 @@ export class VehicleModel {
       runtime.gripLoad = 0;
       runtime.compression = -SUSPENSION_MAX_TRAVEL;
       runtime.suspensionLength = SUSPENSION_REST_LENGTH + SUSPENSION_MAX_TRAVEL;
-      runtime.steerAngle = def.isFront ? input.steer * MAX_STEER_ANGLE * steerScale : 0;
-      return;
+      return { hit: false, contactPoint: hardpoint, springForce: 0 };
     }
 
     const groundDistance = hit.timeOfImpact;
@@ -482,8 +669,18 @@ export class VehicleModel {
     const compression = SUSPENSION_REST_LENGTH - suspensionLength;
     // Suppress the damping term on the very first contact frame: with no
     // continuous compression history to diff against, it would otherwise
-    // produce a huge spurious spike and launch the car.
-    const compressionVel = runtime.wasInContact ? (compression - runtime.compression) / dt : 0;
+    // produce a huge spurious spike and launch the car. That alone isn't
+    // enough, though - a wheel that was briefly airborne (e.g. mid-corner)
+    // and lands with real vertical speed can still swing across the entire
+    // clamped compression range in a single ~4ms sub-step on the frame right
+    // after first contact, implying a compression *rate* of many m/s -
+    // clamp that rate directly (a real damper couldn't react faster than
+    // this either) so no single sub-step can inject a multiple-of-the-car's-
+    // weight spike regardless of why the delta happened.
+    const MAX_COMPRESSION_VEL = 3; // m/s
+    const compressionVel = runtime.wasInContact
+      ? clamp((compression - runtime.compression) / dt, -MAX_COMPRESSION_VEL, MAX_COMPRESSION_VEL)
+      : 0;
     const springForce = Math.min(
       SUSPENSION_MAX_FORCE,
       Math.max(0, SUSPENSION_STIFFNESS * compression + SUSPENSION_DAMPING * compressionVel),
@@ -493,23 +690,40 @@ export class VehicleModel {
     runtime.suspensionLength = suspensionLength;
     runtime.inContact = true;
     runtime.wasInContact = true;
-    runtime.normalLoad = springForce;
 
     const contactPoint = hardpoint.clone().add(rayDir.clone().multiplyScalar(groundDistance));
-    this.chassis.addForceAtPoint(
-      localUp.clone().multiplyScalar(springForce),
-      contactPoint,
-      true,
-    );
+    return { hit: true, contactPoint, springForce };
+  }
+
+  /** Steering + friction-circle tire force for one wheel, given its already-computed (and force-applied) suspension sample. */
+  private stepTireForces(
+    name: WheelName,
+    input: InputState,
+    chassisRot: THREE.Quaternion,
+    suspension: SuspensionSample,
+    drivingForcePerWheel: number,
+    steerScale: number,
+    ax: number,
+    ay: number,
+    downforceTotal: number,
+  ) {
+    const def = this.wheelDefs[name];
+    const runtime = this.wheelRuntime[name];
 
     const steerAngle = def.isFront ? input.steer * MAX_STEER_ANGLE * steerScale : 0;
     runtime.steerAngle = steerAngle;
+
+    if (!suspension.hit) {
+      runtime.angularSpeed = 0;
+      return;
+    }
+
     const localForward = new THREE.Vector3(Math.sin(steerAngle), 0, Math.cos(steerAngle));
     const localRight = new THREE.Vector3(Math.cos(steerAngle), 0, -Math.sin(steerAngle));
     const forwardWorld = localForward.applyQuaternion(chassisRot);
     const rightWorld = localRight.applyQuaternion(chassisRot);
 
-    const contactVel = vecFromRapier(this.chassis.velocityAtPoint(contactPoint));
+    const contactVel = vecFromRapier(this.chassis.velocityAtPoint(suspension.contactPoint));
     const longSpeed = contactVel.dot(forwardWorld);
     const latSpeed = contactVel.dot(rightWorld);
 
@@ -517,11 +731,11 @@ export class VehicleModel {
 
     // Algebraic normal load for the grip-circle limit: static weight share +
     // longitudinal/lateral weight transfer + aero downforce share, decoupled
-    // from the suspension's springForce above (see the constants comment at
-    // the top of the file for why). ax positive = accelerating forward
-    // (weight shifts rearward: front loses, rear gains). ay positive =
-    // centripetal accel toward chassis-right (car turning right): outside
-    // (left) wheels gain load, inside (right) lose it.
+    // from the suspension's springForce (see the constants comment at the
+    // top of the file for why). ax positive = accelerating forward (weight
+    // shifts rearward: front loses, rear gains). ay positive = centripetal
+    // accel toward chassis-right (car turning right): outside (left) wheels
+    // gain load, inside (right) lose it.
     const axleStaticFraction = def.isFront
       ? STATIC_WEIGHT_FRONT_FRACTION
       : 1 - STATIC_WEIGHT_FRONT_FRACTION;
@@ -555,7 +769,15 @@ export class VehicleModel {
       .clone()
       .multiplyScalar(longForce)
       .add(rightWorld.clone().multiplyScalar(latForce));
-    this.chassis.addForceAtPoint(tireForce, contactPoint, true);
+    // forwardWorld/rightWorld are rotated by the full chassis orientation,
+    // so once the chassis is tilted at all, tire friction force (which
+    // should stay in the ground plane) picks up a vertical component - with
+    // no damping or cap of its own (unlike the suspension spring), that
+    // component forms an undamped feedback loop with any further tilt and
+    // can launch the car. Tire forces are constrained to stay horizontal;
+    // vertical support is the suspension's job alone.
+    tireForce.y = 0;
+    this.chassis.addForceAtPoint(tireForce, suspension.contactPoint, true);
   }
 
   getTelemetry(): VehicleTelemetry {
@@ -583,6 +805,7 @@ export class VehicleModel {
       pitchDeg: this.lastPitchDeg,
       aeroDownforceN: this.lastAeroDownforceN,
       aeroDragN: this.lastAeroDragN,
+      stalled: this.stalled,
       wheels,
     };
   }
@@ -603,6 +826,21 @@ function emptyWheelRuntime(): WheelRuntime {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Moves `desiredTransferToA` of force from b to a (or from a to b if
+ * negative), capped at whatever the donor side actually has - so a+b is
+ * always exactly conserved. Used for anti-roll/anti-pitch bars, which
+ * redistribute force between two points but can't create or destroy it.
+ */
+function transferForce(a: number, b: number, desiredTransferToA: number): [number, number] {
+  if (desiredTransferToA >= 0) {
+    const actual = Math.min(desiredTransferToA, b);
+    return [a + actual, b - actual];
+  }
+  const actual = Math.min(-desiredTransferToA, a);
+  return [a - actual, b + actual];
 }
 
 function lerp(a: number, b: number, t: number): number {

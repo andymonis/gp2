@@ -101,6 +101,7 @@ let lastFrameTime = performance.now();
 function physicsStep() {
   input.update(PHYSICS_DT);
   vehicle.applyShifts(input.takeShiftTriggers());
+  vehicle.tryStartEngine(input.takeStartTrigger(), input.clutch);
   // vehicle.step() sub-steps the physics world internally (see vehicle.ts) -
   // it owns calling world.step(), not this function.
   vehicle.step(PHYSICS_DT, input);
@@ -154,7 +155,9 @@ function renderLoop() {
   debugHud.update([
     `FPS: ${smoothedFps.toFixed(0)}`,
     `Speed: ${telemetry.speedKmh.toFixed(1)} km/h (${(telemetry.speedKmh * 0.6214).toFixed(1)} mph)`,
-    `RPM: ${telemetry.engineRpm.toFixed(0)} / ${REDLINE_RPM}`,
+    telemetry.stalled
+      ? `RPM: STALLED - clutch + T to restart`
+      : `RPM: ${telemetry.engineRpm.toFixed(0)} / ${REDLINE_RPM}`,
     `Gear: ${telemetry.gear === 0 ? 'N' : telemetry.gear}`,
     `Throttle: ${telemetry.throttle.toFixed(2)}  Brake: ${telemetry.brake.toFixed(2)}  Clutch: ${telemetry.clutch.toFixed(2)}`,
     `Roll: ${telemetry.rollDeg.toFixed(1)}deg  Pitch: ${telemetry.pitchDeg.toFixed(1)}deg`,

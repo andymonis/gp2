@@ -4,6 +4,7 @@ const KEY_ACCELERATE = "'";
 const KEY_BRAKE = '/';
 const KEY_SHIFT_TRIGGER = ' ';
 const KEY_CLUTCH = 'Shift';
+const KEY_START = 't';
 
 /** Per-second rate at which ramped inputs approach their target value. */
 const RAMP_RATE = 4;
@@ -22,6 +23,7 @@ export class InputState {
 
   private held = new Set<string>();
   private pendingShifts: ShiftDirection[] = [];
+  private pendingStart = false;
 
   constructor() {
     window.addEventListener('keydown', this.onKeyDown);
@@ -35,6 +37,9 @@ export class InputState {
       this.pendingShifts.push(this.throttle > 0 ? 'up' : 'down');
       e.preventDefault();
     }
+    if (e.key === KEY_START) {
+      this.pendingStart = true;
+    }
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
@@ -46,6 +51,13 @@ export class InputState {
     const shifts = this.pendingShifts;
     this.pendingShifts = [];
     return shifts;
+  }
+
+  /** Consumes and returns whether the starter (ignition) key was pressed since the last call. */
+  takeStartTrigger(): boolean {
+    const triggered = this.pendingStart;
+    this.pendingStart = false;
+    return triggered;
   }
 
   /** Advances ramped values toward their target (held-key) state. */

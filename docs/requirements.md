@@ -73,7 +73,8 @@ flowchart LR
 
 - **Engine:** Rapier, driving a simplified-but-real vehicle model — mass, weight transfer, momentum/inertia, collision response.
 - **Grip model:** grip-circle (combined lateral + longitudinal grip budget per tire) — captures the "twitchy, easy to spin" character of 1990 F1 cars without full tire-model simulation.
-- **Explicitly excluded (for now):** aerodynamics/downforce, tire wear, fuel load, mechanical damage.
+- **Aerodynamics:** speed-squared downforce and drag, calibrated to real 1990-era figures (~2000kg downforce at 150mph). Downforce feeds tire grip algebraically (decoupled from suspension spring force, which stays deliberately stiff/short-travel); drag is a real applied force. See [phase-1-driving-feel.md](../plan/phase-1-driving-feel.md) retrospective.
+- **Explicitly excluded (for now):** tire wear, fuel load, mechanical damage.
 - **Gearbox:** sequential, manual. No clutch modeling required for normal up/down shifts.
 - **Clutch:** modeled only for standing starts — holding the clutch key allows revving without stalling/launching; releasing it engages drive.
 - **Driving aids:** none in initial phases; may be added later as an option.

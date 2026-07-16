@@ -157,6 +157,8 @@ function renderLoop() {
     `RPM: ${telemetry.engineRpm.toFixed(0)} / ${REDLINE_RPM}`,
     `Gear: ${telemetry.gear === 0 ? 'N' : telemetry.gear}`,
     `Throttle: ${telemetry.throttle.toFixed(2)}  Brake: ${telemetry.brake.toFixed(2)}  Clutch: ${telemetry.clutch.toFixed(2)}`,
+    `Roll: ${telemetry.rollDeg.toFixed(1)}deg  Pitch: ${telemetry.pitchDeg.toFixed(1)}deg`,
+    `Downforce: ${(telemetry.aeroDownforceN / 9.81).toFixed(0)}kg  Drag: ${telemetry.aeroDragN.toFixed(0)}N`,
     `Camera: ${cameraMode}`,
   ]);
 

@@ -9,4 +9,6 @@ Items deliberately deferred during the requirements workshop — not rejected, j
 - Rebindable controls
 - Multiplayer
 - 2D HUD (lap timer, speed, minimap) beyond the in-cockpit dashboard
-- Aerodynamics/downforce, tire wear, fuel load, mechanical damage in the physics model
+- Tire wear, fuel load, mechanical damage in the physics model
+
+Promoted out of this list: aerodynamics/downforce and longitudinal/lateral weight transfer, added to the physics model in the 2026-07-16 driving-dynamics pass (see [phase-1-driving-feel.md](phase-1-driving-feel.md) retrospective).

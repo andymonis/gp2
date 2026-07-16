@@ -1,29 +1,145 @@
 import * as THREE from 'three';
 
-const LIVERY_PRIMARY = 0x0a2a6b;
-const LIVERY_SECONDARY = 0xf2f2f2;
-const LIVERY_ACCENT = 0xc41e1e;
-const TIRE_COLOR = 0x1a1a1a;
-const RIM_COLOR = 0xd4d4d4;
+/** A 3-component field (size or position) editable independently per axis. */
+export interface Vec3Params {
+  x: number;
+  y: number;
+  z: number;
+}
 
-export const WHEEL_RADIUS = 0.33;
-const WHEEL_WIDTH = 0.28;
+/** A single box-shaped body part: dimensions plus chassis-space position. */
+export interface BoxPart {
+  size: Vec3Params;
+  position: Vec3Params;
+}
 
-// 1990 McLaren MP4/5-derived dimensions: front track 1820mm, rear track
-// 1670mm, wheelbase 2940mm.
-const FRONT_TRACK = 1.82;
-const REAR_TRACK = 1.67;
-const WHEELBASE = 2.94;
-const FRONT_AXLE_Z = WHEELBASE * 0.53;
-const REAR_AXLE_Z = FRONT_AXLE_Z - WHEELBASE;
+/**
+ * A pointed nose cone: a single apex tapering back to a rectangular base
+ * where it meets the tub. Gives a thin, pointed front that widens (and can
+ * rise) toward the rear, instead of a uniform box.
+ */
+export interface NosePart {
+  /** The pointed front tip. */
+  tip: Vec3Params;
+  /** Z position of the rectangular base, where the nose meets the tub. */
+  baseZ: number;
+  /** Full width of the base rectangle. */
+  baseWidth: number;
+  /** Top and bottom Y of the base rectangle. */
+  baseTop: number;
+  baseBottom: number;
+}
+
+/**
+ * Full set of parameters `buildCarMesh` needs to construct the car. This is
+ * the single source of truth for car shape/color/layout - the garage
+ * (garage.ts) edits a copy of this shape live, and `DEFAULT_CAR_DESIGN` below
+ * is what the main game renders.
+ */
+export interface CarDesign {
+  colors: {
+    primary: number;
+    secondary: number;
+    accent: number;
+    tire: number;
+    rim: number;
+  };
+  wheels: {
+    front: { radius: number; width: number };
+    rear: { radius: number; width: number };
+  };
+  /** Track widths, wheelbase, and derived axle/mount placement. */
+  layout: {
+    frontTrack: number;
+    rearTrack: number;
+    wheelbase: number;
+    /** Fraction of the wheelbase, forward of the rear axle, where the front axle sits. */
+    frontAxleRatio: number;
+    mountHeight: number;
+  };
+  tub: BoxPart;
+  nose: NosePart;
+  airbox: BoxPart;
+  frontWing: BoxPart;
+  rearWing: BoxPart & {
+    strutSize: Vec3Params;
+    strutOffsetX: number;
+    strutPositionY: number;
+  };
+}
+
+function vec3(x: number, y: number, z: number): Vec3Params {
+  return { x, y, z };
+}
+
+// 1990 F1-derived proportions, tuned in the garage (garage.html).
+export const DEFAULT_CAR_DESIGN: CarDesign = {
+  colors: {
+    primary: 0x0a2a6b,
+    secondary: 0xf2f2f2,
+    accent: 0xc41e1e,
+    tire: 0x1a1a1a,
+    rim: 0xd4d4d4,
+  },
+  // Real 1990 F1 wheel sizes: front 635mm diameter x 254mm width, rear
+  // 660mm diameter x 381mm width.
+  wheels: {
+    front: { radius: 0.3175, width: 0.254 },
+    rear: { radius: 0.33, width: 0.381 },
+  },
+  layout: {
+    frontTrack: 1.98,
+    rearTrack: 1.9,
+    wheelbase: 2.94,
+    frontAxleRatio: 0.53,
+    mountHeight: 0.05,
+  },
+  tub: {
+    size: vec3(1.3, 0.44, 2.51),
+    position: vec3(0, 0.1, -0.1),
+  },
+  nose: {
+    tip: vec3(0, -0.1, 2.76),
+    baseZ: 1.05,
+    baseWidth: 0.65,
+    baseTop: 0.43,
+    baseBottom: -0.1,
+  },
+  airbox: {
+    size: vec3(0.4, 0.55, 1.2),
+    position: vec3(0, 0.48, -0.38),
+  },
+  frontWing: {
+    size: vec3(1.9, 0.07, 0.46),
+    position: vec3(0, 0, 2.3),
+  },
+  rearWing: {
+    size: vec3(1.55, 0.06, 0.35),
+    position: vec3(0, 0.81, -1.66),
+    strutSize: vec3(0.03, 0.46, 0.15),
+    strutOffsetX: 0.1,
+    strutPositionY: 0.44,
+  },
+};
 
 /** Chassis-space wheel mount offsets (x = left/right, y = up/down, z = forward/back). */
-export const WHEEL_MOUNTS = {
-  frontLeft: new THREE.Vector3(-FRONT_TRACK / 2, 0.05, FRONT_AXLE_Z),
-  frontRight: new THREE.Vector3(FRONT_TRACK / 2, 0.05, FRONT_AXLE_Z),
-  rearLeft: new THREE.Vector3(-REAR_TRACK / 2, 0.05, REAR_AXLE_Z),
-  rearRight: new THREE.Vector3(REAR_TRACK / 2, 0.05, REAR_AXLE_Z),
+export function computeWheelMounts(design: CarDesign) {
+  const frontAxleZ = design.layout.wheelbase * design.layout.frontAxleRatio;
+  const rearAxleZ = frontAxleZ - design.layout.wheelbase;
+  const { frontTrack, rearTrack, mountHeight } = design.layout;
+  return {
+    frontLeft: new THREE.Vector3(-frontTrack / 2, mountHeight, frontAxleZ),
+    frontRight: new THREE.Vector3(frontTrack / 2, mountHeight, frontAxleZ),
+    rearLeft: new THREE.Vector3(-rearTrack / 2, mountHeight, rearAxleZ),
+    rearRight: new THREE.Vector3(rearTrack / 2, mountHeight, rearAxleZ),
+  };
+}
+
+export const WHEEL_RADII = {
+  front: DEFAULT_CAR_DESIGN.wheels.front.radius,
+  rear: DEFAULT_CAR_DESIGN.wheels.rear.radius,
 };
+export const WHEEL_MOUNTS = computeWheelMounts(DEFAULT_CAR_DESIGN);
 
 export interface CarMesh {
   /** Root group; place at the chassis rigid-body's transform each frame. */
@@ -44,99 +160,140 @@ export interface CarMesh {
   };
 }
 
-function buildWheel(): THREE.Mesh {
-  const geometry = new THREE.CylinderGeometry(
-    WHEEL_RADIUS,
-    WHEEL_RADIUS,
-    WHEEL_WIDTH,
-    8,
-  );
+function buildWheel(radius: number, width: number, colors: CarDesign['colors']): THREE.Mesh {
+  const geometry = new THREE.CylinderGeometry(radius, radius, width, 8);
   geometry.rotateZ(Math.PI / 2);
   const material = new THREE.MeshStandardMaterial({
-    color: TIRE_COLOR,
+    color: colors.tire,
     flatShading: true,
   });
   const mesh = new THREE.Mesh(geometry, material);
 
-  const rimGeometry = new THREE.CylinderGeometry(
-    WHEEL_RADIUS * 0.55,
-    WHEEL_RADIUS * 0.55,
-    WHEEL_WIDTH * 1.02,
-    6,
-  );
+  const rimGeometry = new THREE.CylinderGeometry(radius * 0.55, radius * 0.55, width * 1.02, 6);
   rimGeometry.rotateZ(Math.PI / 2);
   const rim = new THREE.Mesh(
     rimGeometry,
-    new THREE.MeshStandardMaterial({ color: RIM_COLOR, flatShading: true }),
+    new THREE.MeshStandardMaterial({ color: colors.rim, flatShading: true }),
   );
   mesh.add(rim);
 
   return mesh;
 }
 
-function buildWheelAssembly(mount: THREE.Vector3): {
+function buildWheelAssembly(
+  mount: THREE.Vector3,
+  radius: number,
+  width: number,
+  colors: CarDesign['colors'],
+): {
   pivot: THREE.Group;
   mesh: THREE.Mesh;
 } {
   const pivot = new THREE.Group();
   pivot.position.copy(mount);
-  const mesh = buildWheel();
+  const mesh = buildWheel(radius, width, colors);
   pivot.add(mesh);
   return { pivot, mesh };
 }
 
-export function buildCarMesh(): CarMesh {
+function boxMesh(part: BoxPart, material: THREE.Material): THREE.Mesh {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(part.size.x, part.size.y, part.size.z),
+    material,
+  );
+  mesh.position.set(part.position.x, part.position.y, part.position.z);
+  return mesh;
+}
+
+/**
+ * A 5-vertex pyramid: a single apex (the nose tip) tapering back to a
+ * rectangular base (where the nose meets the tub). Winding is fixed for the
+ * normal case of tip.z > baseZ (apex in front of the base).
+ */
+function buildNoseMesh(nose: NosePart, material: THREE.Material): THREE.Mesh {
+  const halfWidth = nose.baseWidth / 2;
+  // Vertex order: apex, base top-left, base top-right, base bottom-right, base bottom-left.
+  const positions = new Float32Array([
+    nose.tip.x, nose.tip.y, nose.tip.z,
+    -halfWidth, nose.baseTop, nose.baseZ,
+    halfWidth, nose.baseTop, nose.baseZ,
+    halfWidth, nose.baseBottom, nose.baseZ,
+    -halfWidth, nose.baseBottom, nose.baseZ,
+  ]);
+  // prettier-ignore
+  const indices = [
+    0, 2, 1, // top face
+    0, 3, 2, // right face
+    0, 4, 3, // bottom face
+    0, 1, 4, // left face
+    1, 3, 4, // base cap
+    1, 2, 3, // base cap
+  ];
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  return new THREE.Mesh(geometry, material);
+}
+
+export function buildCarMesh(design: CarDesign = DEFAULT_CAR_DESIGN): CarMesh {
   const group = new THREE.Group();
 
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: LIVERY_PRIMARY,
+    color: design.colors.primary,
     flatShading: true,
   });
   const accentMat = new THREE.MeshStandardMaterial({
-    color: LIVERY_SECONDARY,
+    color: design.colors.secondary,
     flatShading: true,
   });
   const wingMat = new THREE.MeshStandardMaterial({
-    color: LIVERY_ACCENT,
+    color: design.colors.accent,
     flatShading: true,
   });
 
-  // Main tub, tapering slightly toward the nose via non-uniform scale.
-  const tub = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.45, 2.6), bodyMat);
-  tub.position.set(0, 0.35, -0.1);
-  group.add(tub);
+  // Main tub.
+  group.add(boxMesh(design.tub, bodyMat));
 
-  // Nose cone.
-  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.28, 1.3), accentMat);
-  nose.position.set(0, 0.25, 1.75);
-  group.add(nose);
+  // Nose cone: tapers from a point at the front to a rectangle at the tub.
+  group.add(buildNoseMesh(design.nose, accentMat));
 
   // Airbox behind the cockpit.
-  const airbox = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.35, 0.5), bodyMat);
-  airbox.position.set(0, 0.75, -0.8);
-  group.add(airbox);
+  group.add(boxMesh(design.airbox, bodyMat));
 
   // Front wing.
-  const frontWing = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.06, 0.4), wingMat);
-  frontWing.position.set(0, 0.18, 2.3);
-  group.add(frontWing);
+  group.add(boxMesh(design.frontWing, wingMat));
 
   // Rear wing plane + struts.
-  const rearWing = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.06, 0.35), wingMat);
-  rearWing.position.set(0, 0.95, -1.85);
-  group.add(rearWing);
-  const strutGeometry = new THREE.BoxGeometry(0.06, 0.4, 0.06);
+  group.add(boxMesh(design.rearWing, wingMat));
+  const strutGeometry = new THREE.BoxGeometry(
+    design.rearWing.strutSize.x,
+    design.rearWing.strutSize.y,
+    design.rearWing.strutSize.z,
+  );
   const strutLeft = new THREE.Mesh(strutGeometry, bodyMat);
-  strutLeft.position.set(-0.5, 0.72, -1.85);
+  strutLeft.position.set(
+    -design.rearWing.strutOffsetX,
+    design.rearWing.strutPositionY,
+    design.rearWing.position.z,
+  );
   group.add(strutLeft);
   const strutRight = new THREE.Mesh(strutGeometry, bodyMat);
-  strutRight.position.set(0.5, 0.72, -1.85);
+  strutRight.position.set(
+    design.rearWing.strutOffsetX,
+    design.rearWing.strutPositionY,
+    design.rearWing.position.z,
+  );
   group.add(strutRight);
 
-  const frontLeft = buildWheelAssembly(WHEEL_MOUNTS.frontLeft);
-  const frontRight = buildWheelAssembly(WHEEL_MOUNTS.frontRight);
-  const rearLeft = buildWheelAssembly(WHEEL_MOUNTS.rearLeft);
-  const rearRight = buildWheelAssembly(WHEEL_MOUNTS.rearRight);
+  const mounts = computeWheelMounts(design);
+  const { front, rear } = design.wheels;
+  const frontLeft = buildWheelAssembly(mounts.frontLeft, front.radius, front.width, design.colors);
+  const frontRight = buildWheelAssembly(mounts.frontRight, front.radius, front.width, design.colors);
+  const rearLeft = buildWheelAssembly(mounts.rearLeft, rear.radius, rear.width, design.colors);
+  const rearRight = buildWheelAssembly(mounts.rearRight, rear.radius, rear.width, design.colors);
   group.add(frontLeft.pivot, frontRight.pivot, rearLeft.pivot, rearRight.pivot);
 
   return {

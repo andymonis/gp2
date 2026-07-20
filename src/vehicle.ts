@@ -13,24 +13,30 @@ const COM_HEIGHT = 0.3; // above the wheel-mount reference plane
 
 // Sub-steps per outer physics tick. A stiff suspension needs a fine enough
 // integration step to stay numerically stable (see the comment in step()).
-const PHYSICS_SUBSTEPS = 4;
+// Raised from 4: the ARBs (see FRONT_ARB_STIFFNESS) were still showing a
+// growing left/right suspension-force imbalance above ~90mph even after
+// backing off their stiffness - more headroom here, the same lever already
+// used for the clutch/tire stability bounds elsewhere in this file.
+const PHYSICS_SUBSTEPS = 8;
 
 // F1 chassis/suspension is very stiff with minimal travel (unlike a road
-// car) - low travel + high stiffness keeps body roll/pitch small.
+// car) - low travel + high stiffness keeps body roll/pitch small. Backed off
+// from 160000 alongside the ARB stiffness reduction above, for the same
+// discrete-time stability margin reasoning.
 const SUSPENSION_REST_LENGTH = 0.18;
 const SUSPENSION_MAX_TRAVEL = 0.035;
-const SUSPENSION_STIFFNESS = 160000; // N/m
+const SUSPENSION_STIFFNESS = 100000; // N/m
 const SUSPENSION_DAMPING = 7000; // Ns/m
 
 const SUSPENSION_MAX_FORCE = 30000; // N, safety cap against contact-transition spikes
 
 const TIRE_GRIP_FRONT = 1.75; // friction-circle coefficient (mu)
-const TIRE_GRIP_REAR = 1.7;
+const TIRE_GRIP_REAR = 1.85; // slightly higher than front, typical of a rear-drive car
 const LATERAL_STIFFNESS = 9000; // N per m/s of lateral slip velocity
 
 // --- Aero + weight transfer -------------------------------------------------
 // Suspension travel is only 3.5cm (see above), so its spring force alone
-// cannot represent ~2000kgf of aero downforce or real weight-transfer loads
+// cannot represent ~1000kgf of aero downforce or real weight-transfer loads
 // without bottoming out. Instead, the per-wheel normal load used for the
 // grip-circle limit is computed algebraically here (static share + weight
 // transfer + aero), decoupled from the suspension's springForce (which keeps
@@ -39,8 +45,52 @@ const GRAVITY = 9.81;
 const STATIC_WEIGHT_FRONT_FRACTION = 0.45; // rear-engined car: rest-state front/rear split
 const AERO_FRONT_FRACTION = 0.35; // front wing is much smaller than rear wing + diffuser
 
-// Calibrated so downforceTotal(150mph = 67.056 m/s) ≈ 19620N (2000kgf).
-const AERO_DOWNFORCE_K = 4.364; // N per (m/s)^2
+// Downforce at 150mph (67.056 m/s) works out to ~5845N (~596kgf) at this
+// value - reduced further after a request that even the previous ~1000kgf
+// figure (itself already corrected down once from an initial 2000kgf) was
+// still too high for this era.
+const AERO_DOWNFORCE_K = 1.3; // N per (m/s)^2
+
+// Above this much downforce, only a reduced fraction of any *additional*
+// downforce feeds the tire grip-circle ceiling (gripRelevantDownforce below)
+// - the real, full downforce number (AERO_DOWNFORCE_K*speed^2) is still what
+// telemetry/HUD reports and still grows with v^2 as calibrated. Added after
+// playtesting found that at the top of the speed range, even a very small,
+// brief steering input could demand more instantaneous lateral weight
+// transfer than the F1-stiff, 3.5cm-travel suspension could geometrically
+// represent, lifting an inside wheel from what should have been a minor
+// correction - confirmed (not just guessed) via a scripted diagnostic
+// showing peak roll barely changed even when the steering angle itself was
+// halved or suspension travel doubled, meaning the achievable *lateral
+// force* at speed - driven by the grip ceiling, not the steering curve or
+// travel - was the actual lever. Tapering only the grip contribution (not
+// the physical downforce number) keeps low/mid-speed cornering and braking
+// exactly as before while softening how easily a small correction becomes a
+// wheel-lift event right at the top of the range.
+//
+// This is a real, measured improvement (same diagnostic: peak roll from a
+// brief 150mph steering tap dropped from ~2.9deg to ~1.7deg, and the chassis
+// settles back to level in about half the time), not a full fix - the inside
+// wheel still fully unloads from the same tap. Eliminating that outright
+// would mean capping the grip ceiling down near its low-speed (no-aero)
+// level, which would also flatten out most of the "corners on rails at
+// speed" character the aero model exists to produce - a real tradeoff, not
+// just an untried knob. If more is needed, the next lever is deliberately
+// not this one (see the phase plan retrospective for the options weighed).
+// Expressed as a target speed rather than a copied-out Newton value, so it
+// automatically re-targets the same ~120mph threshold whenever
+// AERO_DOWNFORCE_K changes - a fixed number already drifted out of sync once
+// (silently stopped tapering anything for a while after AERO_DOWNFORCE_K was
+// halved in an earlier pass, caught and fixed manually; tying it to the same
+// source constant instead makes that impossible to repeat).
+const AERO_GRIP_TAPER_SPEED_MS = 120 * 0.44704; // ~120mph, in m/s
+const AERO_GRIP_DOWNFORCE_CAP_N = AERO_DOWNFORCE_K * AERO_GRIP_TAPER_SPEED_MS ** 2; // untapered below this
+const AERO_GRIP_TAPER_ABOVE_CAP = 0.2; // fraction of downforce beyond the cap that still feeds grip
+
+function gripRelevantDownforce(downforceTotal: number): number {
+  if (downforceTotal <= AERO_GRIP_DOWNFORCE_CAP_N) return downforceTotal;
+  return AERO_GRIP_DOWNFORCE_CAP_N + (downforceTotal - AERO_GRIP_DOWNFORCE_CAP_N) * AERO_GRIP_TAPER_ABOVE_CAP;
+}
 // Calibrated so 6th gear's redline-derived top speed (217mph) is roughly
 // where available drive force balances drag - a rough starting point that
 // needs empirical iteration from measured top speed (see plan doc).
@@ -67,8 +117,20 @@ const REAR_TRACK = WHEEL_MOUNTS.rearRight.x - WHEEL_MOUNTS.rearLeft.x;
 // leaning into a corner like a real car. An ARB is a real, physical force at
 // the wheel contact points - it can't produce that disconnect between what
 // the chassis looks like and what the wheels are actually doing.
-const FRONT_ARB_STIFFNESS = 400000; // N per m of left/right compression difference
-const REAR_ARB_STIFFNESS = 400000;
+// A discrete-time stability bound applies to this stiffness the same way it
+// does to CLUTCH_SLIP_GAIN/LONGITUDINAL_STIFFNESS elsewhere in this file: a
+// scripted straight-line high-speed run (zero steering, temporary per-substep
+// force logging) found the *original* higher stiffness here genuinely
+// unstable - left/right suspension force flipping which side carried the
+// load on every single substep (the fastest a discrete sim can alternate at
+// all), not a real cornering response. A velocity/damping term was tried
+// first but made it worse: the wheel's own raycast compression carries a
+// tiny (~0.3mm) but genuinely alternating-every-substep jitter that a
+// damping term turns into a large, sign-flipping spurious force. Fixed by
+// backing the stiffness itself off to a level with real margin instead -
+// simpler and doesn't require filtering out a numerical artifact.
+const FRONT_ARB_STIFFNESS = 120000; // N per m of left/right compression difference
+const REAR_ARB_STIFFNESS = 120000;
 
 // Same real-force mechanism as the roll ARBs above, but coupling front-axle
 // vs rear-axle average compression instead of left vs right - resists
@@ -77,26 +139,33 @@ const REAR_ARB_STIFFNESS = 400000;
 // is grip-limited rather than an arbitrary low cap - hard braking can apply
 // a large pitching moment, and without this the rear could briefly lift off
 // entirely under heavy braking with no anti-dive resistance at all.
-const PITCH_ARB_STIFFNESS = 400000; // N per m of front/rear average compression difference
+const PITCH_ARB_STIFFNESS = 200000; // N per m of front/rear average compression difference - raised further than FRONT_ARB_STIFFNESS as part of the same flat-cornering pass below
 
-// The ARBs above are the real, load-transfer-accurate roll/pitch resistance
-// and are the dominant mechanism while all 4 wheels are grounded - but an
-// ARB only reacts to an actual left/right (or front/rear) compression
-// difference, so once a wheel genuinely lifts off it disengages entirely,
-// leaving nothing pulling the chassis back toward level while airborne on
-// one side. Two extra terms cover that gap:
-// - Pure rate damping (no angle term) prevents a moderate steering input
-//   from growing into an uncontrolled spin/flip in the moments before the
-//   ARBs' load-transfer response engages.
-// - A deliberately weak angle-restoring term (~6x weaker than the old
-//   whole-body corrective torque these replaced) biases the car back toward
-//   level once a hard corner eases, without being strong enough to visibly
-//   hold the chassis flat while it's genuinely unsupported - which was the
-//   original "floating on two wheels" bug: a real car's weight pulls it back
-//   down long before a term this weak could fight that.
-const ROLL_STIFFNESS_NM_PER_RAD = 60000;
+// The ARBs above are the real, load-transfer-accurate per-wheel roll/pitch
+// resistance, reacting only to an actual left/right (or front/rear)
+// compression difference - so on their own they still let an inside wheel's
+// suspension force fully unload during hard cornering (normalLoad can still
+// read 0 there; that per-wheel physics hasn't changed). What changed here is
+// the whole-body angle-restoring/rate-damping torque layered on top: this
+// used to be deliberately kept weak (~6x weaker than the whole-body torque
+// it replaced) specifically so it couldn't hold the chassis level while a
+// wheel was genuinely airborne - the original "floating on two wheels" bug.
+// Tuned back up to real strength after playtesting: with it strong (roll
+// stiffness 60000->400000, its rate damping 25000->50000), the chassis
+// itself stays close to flat through hard cornering (~0.3deg roll instead of
+// 2-3deg, confirmed via the scripted turn-in diagnostic) even though the
+// ARB's own inside-wheel load transfer underneath is unchanged - "flat" and
+// "the inside wheel stops unloading" turned out to be two different things,
+// and this is deliberately choosing the former over strict per-wheel
+// load-transfer realism, since it drives better from keyboard input. Revives
+// the original bug's risk in principle (this torque doesn't check per-wheel
+// ground contact before acting) - not observed in normal hard-cornering
+// testing since the wheel stays grounded (just unloaded) rather than truly
+// airborne, but worth re-checking if a future pass adds real jumps/kerb
+// strikes that can put a wheel genuinely off the ground.
+const ROLL_STIFFNESS_NM_PER_RAD = 200000;
 const PITCH_STIFFNESS_NM_PER_RAD = 50000;
-const ROLL_RATE_DAMPING_NM_PER_RAD_S = 25000;
+const ROLL_RATE_DAMPING_NM_PER_RAD_S = 50000;
 const PITCH_RATE_DAMPING_NM_PER_RAD_S = 22000;
 
 const MAX_STEER_ANGLE = 0.5; // radians (~28.6deg), applied at a standstill
@@ -202,19 +271,28 @@ const ENGINE_FRICTION_GAIN = 0.008;
 const GEAR_RATIOS = [5.742, 3.589, 2.564, 1.927, 1.544, 1.323];
 const FINAL_DRIVE = 3.5;
 
-// Honda RA109E 3.5L V10 torque curve (McLaren MP4/5). The 4000rpm point is
-// extrapolated - no data was available below 6000rpm - to give idle a sane
-// starting torque rather than an undefined value.
+// Honda RA109E 3.5L V10 torque curve (McLaren MP4/5), from a supplied
+// torque+power table. The 4000rpm point is extrapolated - no data was
+// available below 6000rpm - to give idle a sane starting torque rather than
+// an undefined value.
+//
+// Cross-checked against the table's power (kW) column via P = T*rpm*2pi/60
+// before using it: every point from 7000rpm up lands within ~5% (fine for
+// "approx" figures), except 6000rpm, where the given torque (250Nm) implies
+// only 157kW, not the 225kW listed - a real, unresolved 43% mismatch, likely
+// a misread at the steepest part of the curve, flagged rather than silently
+// picked. Used the torque column as-is (it's what the sim actually consumes)
+// pending a source double-check.
 const TORQUE_CURVE: [rpm: number, torqueNm: number][] = [
   [IDLE_RPM, 150],
-  [6000, 220],
+  [6000, 250],
   [7000, 380],
   [8000, 400],
   [9000, 400],
-  [10000, 400],
+  [10000, 410],
   [11000, 400],
   [12000, 400],
-  [13000, 350],
+  [13000, 360],
 ];
 
 function engineTorqueNm(rpm: number): number {
@@ -258,6 +336,7 @@ interface WheelRuntime {
   slipSpeed: number; // m/s, signed: wheel surface speed minus ground contact speed
   locked: boolean; // true if the wheel has been braked to a stop while grounded
   steerAngle: number;
+  surfaceGrip: number; // grip multiplier of whatever this wheel's raycast last hit (track/grass/etc)
 }
 
 export interface WheelVisualState {
@@ -268,6 +347,7 @@ export interface WheelVisualState {
   gripLoad: number;
   slipSpeed: number;
   locked: boolean;
+  surfaceGrip: number;
 }
 
 export interface VehicleTelemetry {
@@ -304,12 +384,21 @@ export class VehicleModel {
   private lastAeroDragN = 0;
   private lastRollDeg = 0;
   private lastPitchDeg = 0;
+  private getSurfaceGrip: (colliderHandle: number) => number;
 
-  constructor(world: RAPIER.World, spawnPosition: THREE.Vector3) {
+  constructor(
+    world: RAPIER.World,
+    spawnPosition: THREE.Vector3,
+    spawnYaw = 0,
+    getSurfaceGrip: (colliderHandle: number) => number = () => 1,
+  ) {
     this.world = world;
+    this.getSurfaceGrip = getSurfaceGrip;
 
+    const spawnRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), spawnYaw);
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(spawnPosition.x, spawnPosition.y, spawnPosition.z)
+      .setRotation(spawnRotation)
       .setLinearDamping(0.05)
       .setAngularDamping(1.2)
       .setCanSleep(false);
@@ -593,6 +682,7 @@ export class VehicleModel {
         this.chassis.addForceAtPoint(axes.up.clone().multiplyScalar(finalForce[name]), sample.contactPoint, true);
       }
 
+      const gripDownforceTotal = gripRelevantDownforce(downforceTotal);
       for (const name of WHEEL_NAMES) {
         this.stepTireForces(
           name,
@@ -604,7 +694,7 @@ export class VehicleModel {
           steerScale,
           ax,
           ay,
-          downforceTotal,
+          gripDownforceTotal,
         );
       }
 
@@ -709,6 +799,8 @@ export class VehicleModel {
     runtime.inContact = true;
     runtime.wasInContact = true;
 
+    runtime.surfaceGrip = this.getSurfaceGrip(hit.collider.handle);
+
     const contactPoint = hardpoint.clone().add(rayDir.clone().multiplyScalar(groundDistance));
     return { hit: true, contactPoint, springForce };
   }
@@ -747,7 +839,7 @@ export class VehicleModel {
     steerScale: number,
     ax: number,
     ay: number,
-    downforceTotal: number,
+    gripDownforceTotal: number,
   ) {
     const def = this.wheelDefs[name];
     const runtime = this.wheelRuntime[name];
@@ -793,7 +885,7 @@ export class VehicleModel {
     const longTransfer = def.isFront ? -longTransferTotal / 2 : longTransferTotal / 2;
     const latTransferAxle = (MASS_KG * axleStaticFraction * ay * COM_HEIGHT) / axleTrack;
     const latTransfer = def.isLeft ? latTransferAxle : -latTransferAxle;
-    const aeroLoad = (downforceTotal * axleAeroFraction) / 2;
+    const aeroLoad = (gripDownforceTotal * axleAeroFraction) / 2;
 
     const gripLoad = Math.max(0, staticLoad + longTransfer + latTransfer + aeroLoad);
     runtime.gripLoad = gripLoad;
@@ -809,7 +901,7 @@ export class VehicleModel {
     const latDemand = -LATERAL_STIFFNESS * latSpeed;
 
     const demandMag = Math.hypot(rawLongDemand, latDemand);
-    const gripLimit = def.grip * gripLoad;
+    const gripLimit = def.grip * runtime.surfaceGrip * gripLoad;
     const scale = demandMag > gripLimit && demandMag > 0 ? gripLimit / demandMag : 1;
 
     const longForce = rawLongDemand * scale;
@@ -860,6 +952,7 @@ export class VehicleModel {
         gripLoad: runtime.gripLoad,
         slipSpeed: runtime.slipSpeed,
         locked: runtime.locked,
+        surfaceGrip: runtime.surfaceGrip,
       };
     }
     return {
@@ -890,6 +983,7 @@ function emptyWheelRuntime(): WheelRuntime {
     slipSpeed: 0,
     locked: false,
     steerAngle: 0,
+    surfaceGrip: 1,
   };
 }
 

@@ -1,6 +1,6 @@
 # Phase 1 — PoC: Driving Feel
 
-**Status:** In progress
+**Status:** Done
 **Requirements reference:** [docs/requirements.md §5, §6, §7](../docs/requirements.md)
 
 ## Goal
@@ -43,7 +43,7 @@ Real track/circuit, lap timing, sound, AI opponents, ghost replay, 2D HUD, drivi
 - [x] Implement clutch state (shift key) for standing starts
 - [x] Cockpit camera rig attached to car
 - [x] Model low-poly dashboard geometry (rev needle + gear indicator) driven by vehicle state
-- [ ] Playtest and tune grip-circle parameters until the car feels right (twitchy, powerful, easy to spin) — needs a human behind the keyboard; functional correctness is scripted/verified but "feel" isn't
+- [x] Playtest and tune grip-circle parameters until the car feels right (twitchy, powerful, easy to spin) — needs a human behind the keyboard; functional correctness is scripted/verified but "feel" isn't
 
 ## Definition of done
 
@@ -88,3 +88,7 @@ Playtesting this pass surfaced three more issues: acceleration still felt sluggi
 Verified via the same scripted-Playwright approach: braking from 100mph now decelerates smoothly to a near-stop instead of hanging at a floor speed; 0-60mph and per-gear top speeds unchanged from the prior pass (no regression); hard cornering at 80mph now shows a stable, bounded ~4-5° roll angle instead of an unbounded climb that previously reached 40-90° before the chassis literally launched into the air and went into freefall with zero linear/angular velocity (the "floating" bug, now fixed at the root cause rather than patched over).
 
 **Follow-up same day:** the engine-stall mechanic (dies under hard braking without clutching in, restart via clutch + `t`) was cut after playtesting - it read as "way too dramatic" and didn't add anything at this stage. Reverted `tryStartEngine()`, the `stalled` state/telemetry, and the `t` key; kept the capped idle governor (`IDLE_ASSIST_MAX_NM`), which is what actually fixes the braking-floor bug on its own - without stalling, the engine now just gets dragged down toward a low-rpm safety floor under hard braking (mild, non-dramatic engine braking) instead of either fighting the brakes (the original bug) or requiring a restart ritual (the cut feature). Everything else from this entry (ARBs, rate/angle roll damping, corrected roll telemetry, raised brake force cap) is unaffected and still in place.
+
+### 2026-07-17 — Phase closed
+
+Flat-plane driving feel judged good enough as a base to build on. Further "feel" tuning (grip-circle coefficients, suspension, gearing) is deliberately deferred rather than pursued further in isolation — it's hard to judge a car's feel meaningfully on an open plane with no real corners, camber, or braking references, so the plan is to keep iterating on feel once there's an actual track to drive (Phase 2). All Phase 1 tunable constants remain grouped at the top of `src/vehicle.ts` for whenever that resumes.

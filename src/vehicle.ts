@@ -45,11 +45,25 @@ const GRAVITY = 9.81;
 const STATIC_WEIGHT_FRONT_FRACTION = 0.45; // rear-engined car: rest-state front/rear split
 const AERO_FRONT_FRACTION = 0.35; // front wing is much smaller than rear wing + diffuser
 
+// Wing level: the real F1 setup trade-off this was missing - downforce and
+// drag are not two independently-tunable numbers, they're the same wing
+// surface. More wing angle always buys both more downforce (higher corner
+// speed) and more drag (lower top speed) together; less wing always sheds
+// both together. Expressing AERO_DOWNFORCE_K/AERO_DRAG_K below as this one
+// shared multiplier times their own base value means a future "low-downforce
+// Monza setup" vs "high-downforce Monaco setup" pass only has one lever to
+// turn, and the two numbers can never silently drift apart the way
+// AERO_GRIP_DOWNFORCE_CAP_N once did when only AERO_DOWNFORCE_K changed (see
+// that constant's own comment below). 1.0 is this car's current tuned
+// baseline - unchanged behavior from before this lever existed.
+const AERO_WING_LEVEL = 1.0;
+
 // Downforce at 150mph (67.056 m/s) works out to ~5845N (~596kgf) at this
 // value - reduced further after a request that even the previous ~1000kgf
 // figure (itself already corrected down once from an initial 2000kgf) was
 // still too high for this era.
-const AERO_DOWNFORCE_K = 1.3; // N per (m/s)^2
+const AERO_DOWNFORCE_BASE_K = 1.3; // N per (m/s)^2, at AERO_WING_LEVEL=1
+const AERO_DOWNFORCE_K = AERO_DOWNFORCE_BASE_K * AERO_WING_LEVEL;
 
 // Above this much downforce, only a reduced fraction of any *additional*
 // downforce feeds the tire grip-circle ceiling (gripRelevantDownforce below)
@@ -98,7 +112,8 @@ function gripRelevantDownforce(downforceTotal: number): number {
 // ~121mph in 4th gear - well short of even that gear's own 149mph target -
 // per the scripted verification pass; 0.15 still asymptotically stalled
 // just under 4th gear's redline threshold at ~142mph.)
-const AERO_DRAG_K = 0.08; // N per (m/s)^2
+const AERO_DRAG_BASE_K = 0.08; // N per (m/s)^2, at AERO_WING_LEVEL=1
+const AERO_DRAG_K = AERO_DRAG_BASE_K * AERO_WING_LEVEL;
 
 const WHEELBASE = WHEEL_MOUNTS.frontLeft.z - WHEEL_MOUNTS.rearLeft.z;
 const FRONT_TRACK = WHEEL_MOUNTS.frontRight.x - WHEEL_MOUNTS.frontLeft.x;
@@ -334,6 +349,7 @@ interface WheelRuntime {
   gripLoad: number; // algebraic normal load used for the grip-circle limit
   angularSpeed: number; // rad/s, real integrated wheel spin state (not a kinematic readout)
   slipSpeed: number; // m/s, signed: wheel surface speed minus ground contact speed
+  lateralSlipSpeed: number; // m/s, signed: contact-patch sideways speed - how hard the tire is scrubbing sideways
   locked: boolean; // true if the wheel has been braked to a stop while grounded
   steerAngle: number;
   surfaceGrip: number; // grip multiplier of whatever this wheel's raycast last hit (track/grass/etc)
@@ -346,6 +362,7 @@ export interface WheelVisualState {
   normalLoad: number;
   gripLoad: number;
   slipSpeed: number;
+  lateralSlipSpeed: number;
   locked: boolean;
   surfaceGrip: number;
 }
@@ -853,6 +870,7 @@ export class VehicleModel {
       // spins up/down under drive and brake torque alone.
       runtime.angularSpeed = this.integrateWheelSpin(def, runtime.angularSpeed, driveTorque, 0, input.brake, dt);
       runtime.slipSpeed = 0;
+      runtime.lateralSlipSpeed = 0;
       runtime.gripLoad = 0;
       runtime.locked = false;
       return;
@@ -866,6 +884,7 @@ export class VehicleModel {
     const contactVel = vecFromRapier(this.chassis.velocityAtPoint(suspension.contactPoint));
     const longSpeed = contactVel.dot(forwardWorld);
     const latSpeed = contactVel.dot(rightWorld);
+    runtime.lateralSlipSpeed = latSpeed;
 
     // Algebraic normal load for the grip-circle limit: static weight share +
     // longitudinal/lateral weight transfer + aero downforce share, decoupled
@@ -951,6 +970,7 @@ export class VehicleModel {
         normalLoad: runtime.normalLoad,
         gripLoad: runtime.gripLoad,
         slipSpeed: runtime.slipSpeed,
+        lateralSlipSpeed: runtime.lateralSlipSpeed,
         locked: runtime.locked,
         surfaceGrip: runtime.surfaceGrip,
       };
@@ -981,6 +1001,7 @@ function emptyWheelRuntime(): WheelRuntime {
     gripLoad: 0,
     angularSpeed: 0,
     slipSpeed: 0,
+    lateralSlipSpeed: 0,
     locked: false,
     steerAngle: 0,
     surfaceGrip: 1,

@@ -3,6 +3,9 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { buildCarMesh } from './car-mesh';
 import { buildTrack } from './track';
 import { buildDashboard } from './dashboard';
+import { createGameAudio, type GameAudio } from './audio-context';
+import { EngineAudio } from './engine-audio';
+import { TireAudio } from './tire-audio';
 import { InputState } from './input';
 import { VehicleModel, REDLINE_RPM, type WheelName } from './vehicle';
 import { FreeCamera } from './free-camera';
@@ -71,7 +74,14 @@ window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'c') {
     setCameraMode(cameraMode === 'cockpit' ? 'free' : 'cockpit');
   }
+  if (e.key.toLowerCase() === 'm') {
+    gameAudio.setMuted(!gameAudio.isMuted());
+  }
 });
+
+const gameAudio = createGameAudio();
+const engineAudio = new EngineAudio(gameAudio);
+const tireAudio = new TireAudio(gameAudio);
 
 // Dashboard: mounted in front of the driver, facing back toward the camera.
 // Lowered 20cm along with the eye position above, so it stays in the same
@@ -133,6 +143,13 @@ function syncVisuals() {
   dashboard.setRpmFraction(rpmFraction);
   dashboard.setGear(telemetry.gear);
 
+  engineAudio.update(telemetry.engineRpm, telemetry.throttle);
+
+  const wheelStates = Object.values(telemetry.wheels);
+  const avgLateralSlipSpeed =
+    wheelStates.reduce((sum, w) => sum + Math.abs(w.lateralSlipSpeed), 0) / wheelStates.length;
+  tireAudio.update(avgLateralSlipSpeed);
+
   return telemetry;
 }
 
@@ -171,6 +188,7 @@ function renderLoop() {
     `Downforce: ${(telemetry.aeroDownforceN / 9.81).toFixed(0)}kg  Drag: ${telemetry.aeroDragN.toFixed(0)}N`,
     `Surface grip: ${avgSurfaceGrip.toFixed(2)}x ${avgSurfaceGrip > 0.8 ? '(track)' : '(grass)'}`,
     `Camera: ${cameraMode}`,
+    `Audio: ${gameAudio.isMuted() ? 'muted' : 'on'} (m to toggle)`,
     ``,
     `Lap: ${formatLapTime(lapState.currentLapSeconds)}`,
     `Last: ${formatLapTime(lapState.lastLapSeconds)}  Best: ${formatLapTime(lapState.bestLapSeconds)}`,
@@ -189,8 +207,14 @@ const debugHandle = window as unknown as {
   __getCameraMode: () => string;
   __flyTo: (pos: [number, number, number], lookAt: [number, number, number]) => void;
   __lapTimer: LapTimer;
+  __engineAudio: EngineAudio;
+  __tireAudio: TireAudio;
+  __gameAudio: GameAudio;
 };
 debugHandle.__vehicle = vehicle;
+debugHandle.__engineAudio = engineAudio;
+debugHandle.__tireAudio = tireAudio;
+debugHandle.__gameAudio = gameAudio;
 debugHandle.__getCameraMode = () => cameraMode;
 debugHandle.__flyTo = (pos, lookAt) => {
   freeCamera.enabled = false;
